@@ -3,7 +3,7 @@
 A small local development service registry and reverse proxy. One daemon gives each local web app
 a stable hostname and forwards requests to the app's real port:
 
-- `http://localhost`: dashboard of registered apps, with start/stop/restart, logs, and discovery
+- `http://localhost`: dashboard of registered apps, with live previews, start/stop/restart, logs, and discovery
 - `http://myapp.localhost`: proxied to the app's port, including WebSockets/HMR and SSE/streaming
 - a CLI and a JSON API built for scripts and coding agents
 

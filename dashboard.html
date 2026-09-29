@@ -53,14 +53,33 @@ dialog::backdrop { background: rgb(0 0 0 / .45); }
 .dlg-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); gap: 8px; }
 #logbody { margin: 0; padding: 12px 14px; height: min(65vh, 600px); overflow: auto; white-space: pre-wrap; word-break: break-all; background: var(--bg); }
 .err { color: var(--bad); font-size: 12px; margin-left: auto; }
-@media (max-width: 640px) { .row { grid-template-columns: 1fr; } .actions { justify-content: flex-start; } }
+.row.app { grid-template-columns: auto minmax(0, 1fr) auto; }
+.hdr-right { display: flex; align-items: center; gap: 14px; }
+.toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--mute); cursor: pointer; user-select: none; }
+.thumb { width: 176px; height: 110px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; position: relative;
+         background: var(--bg); cursor: zoom-in; flex: none; display: grid; place-items: center; color: var(--mute); font-size: 11px; }
+.thumb iframe { position: absolute; top: 0; left: 0; width: 1280px; height: 800px; border: 0; background: #fff;
+                transform: scale(0.1375); transform-origin: 0 0; pointer-events: none; }
+.thumb.idle { cursor: default; }
+body.nopreview .thumb { display: none; }
+body.nopreview .row.app { grid-template-columns: minmax(0, 1fr) auto; }
+#preview { width: min(1280px, calc(100vw - 32px)); }
+#preview .dlg-head a { font-family: var(--mono); font-size: 12px; color: var(--accent); margin-right: auto; margin-left: 10px; }
+#preview iframe { display: block; width: 100%; height: min(78vh, 900px); border: 0; background: #fff; }
+@media (max-width: 640px) {
+  .row, .row.app, body.nopreview .row.app { grid-template-columns: 1fr; }
+  .actions { justify-content: flex-start; }
+}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
     <h1>localdev <span id="ver"></span></h1>
-    <div class="meta" id="daemon"></div>
+    <div class="hdr-right">
+      <label class="toggle"><input type="checkbox" id="previews" checked> Previews</label>
+      <div class="meta" id="daemon"></div>
+    </div>
   </header>
 
   <div class="list" id="apps"><div class="empty">Loading…</div></div>
@@ -72,6 +91,12 @@ dialog::backdrop { background: rgb(0 0 0 / .45); }
 <dialog id="logs">
   <div class="dlg-head"><strong id="logtitle"></strong><button id="logclose">Close</button></div>
   <pre id="logbody"></pre>
+</dialog>
+
+<dialog id="preview">
+  <div class="dlg-head"><strong id="pvtitle"></strong><a id="pvlink" target="_blank" rel="noopener"></a>
+    <button id="pvreload">Reload</button><button id="pvclose">Close</button></div>
+  <iframe id="pvframe" title="App preview"></iframe>
 </dialog>
 
 <script>
@@ -91,7 +116,12 @@ async function api(method, path, body) {
   return data;
 }
 
-function appRow(a) {
+const SANDBOX = "allow-scripts allow-same-origin allow-forms allow-popups allow-modals";
+const rows = new Map();
+let previewsOn = true;
+try { previewsOn = localStorage.getItem("localdev.previews") !== "0"; } catch {}
+
+function appInfo(a) {
   const managed = a.managed;
   const alive = a.status === "running" || a.status === "starting";
   const sub = managed ? `$ ${a.command}` : `proxy only → port ${a.port}`;
@@ -104,28 +134,59 @@ function appRow(a) {
   btns.push(`<button class="danger" data-act="remove">Remove</button>`);
   const stale = a.stale ? `<span class="badge stale" title="Definition changed since start; restart to apply">stale</span>` : "";
   const exit = a.status === "exited" ? ` (code ${esc(a.exit_code)})` : "";
-  return `<div class="row" data-name="${esc(a.name)}">
-    <div>
-      <div class="title"><span class="dot ${esc(a.status)}" title="${esc(a.status)}"></span>
-        <a class="name" href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.name)}</a>
-        <a class="url" href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.url)}</a>
-        <span class="badge">${esc(a.status)}${exit}</span><span class="badge">:${esc(a.port)}</span>${stale}</div>
-      <div class="sub" title="${esc(sub)}">${esc(sub)}</div>
-      ${a.cwd ? `<div class="sub" title="${esc(a.cwd)}">${esc(a.cwd)}</div>` : ""}
-    </div>
-    <div class="actions">${btns.join("")}</div>
-  </div>`;
+  const info = `<div class="title"><span class="dot ${esc(a.status)}" title="${esc(a.status)}"></span>
+      <a class="name" href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.name)}</a>
+      <a class="url" href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.url)}</a>
+      <span class="badge">${esc(a.status)}${exit}</span><span class="badge">:${esc(a.port)}</span>${stale}</div>
+    <div class="sub" title="${esc(sub)}">${esc(sub)}</div>
+    ${a.cwd ? `<div class="sub" title="${esc(a.cwd)}">${esc(a.cwd)}</div>` : ""}`;
+  return { info, actions: btns.join("") };
+}
+
+// Thumbnails are live iframes; only rebuild one when the app's reachability changes,
+// otherwise the 2s refresh would reload every app constantly.
+function updateThumb(row, a) {
+  const t = row.querySelector(".thumb");
+  const key = !previewsOn ? "off" : a.status === "running" ? `${a.url}|${a.started_at || ""}` : a.status;
+  if (t.dataset.key === key) return;
+  t.dataset.key = key;
+  t.dataset.url = a.status === "running" ? a.url : "";
+  t.classList.toggle("idle", a.status !== "running");
+  t.title = a.status === "running" ? "Click to preview" : "";
+  if (!previewsOn) t.innerHTML = "";
+  else if (a.status === "running") t.innerHTML = `<iframe src="${esc(a.url)}" tabindex="-1" loading="lazy" sandbox="${SANDBOX}" title="${esc(a.name)} preview"></iframe>`;
+  else t.textContent = a.status === "starting" ? "starting…" : "no preview";
 }
 
 function renderApps(apps) {
   const el = $("#apps");
   if (!apps.length) {
+    rows.clear();
     el.innerHTML = `<div class="empty">No apps registered yet. From a project directory:
 <pre>localdev run myapp -- npm run dev      # managed: localdev starts it and sets $PORT
 localdev register myapp --port 3000    # proxy to a server you run yourself</pre></div>`;
     return;
   }
-  el.innerHTML = apps.map(appRow).join("");
+  el.querySelectorAll(":scope > .empty").forEach((n) => n.remove());
+  const names = new Set(apps.map((a) => a.name));
+  for (const [name, row] of rows) if (!names.has(name)) { row.remove(); rows.delete(name); }
+  apps.forEach((a, i) => {
+    let row = rows.get(a.name);
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "row app";
+      row.dataset.name = a.name;
+      row.innerHTML = `<div class="thumb"></div><div class="info"></div><div class="actions"></div>`;
+      rows.set(a.name, row);
+    }
+    const { info, actions } = appInfo(a);
+    const infoEl = row.querySelector(".info"), actEl = row.querySelector(".actions");
+    if (infoEl.innerHTML !== info) infoEl.innerHTML = info;
+    if (actEl.dataset.html !== actions) { actEl.innerHTML = actions; actEl.dataset.html = actions; }
+    updateThumb(row, a);
+    // Moving an iframe in the DOM reloads it, so only insert rows that are out of place.
+    if (el.children[i] !== row) el.insertBefore(row, el.children[i] || null);
+  });
 }
 
 function renderFound(list) {
@@ -211,6 +272,34 @@ function openLogs(name) {
   loadLogs().then(() => { $("#logbody").scrollTop = $("#logbody").scrollHeight; });
 }
 $("#logclose").addEventListener("click", () => $("#logs").close());
+
+$("#apps").addEventListener("click", (ev) => {
+  const t = ev.target.closest(".thumb");
+  if (!t || !t.dataset.url) return;
+  const name = t.closest(".row").dataset.name;
+  $("#pvtitle").textContent = name;
+  $("#pvlink").textContent = t.dataset.url + " ↗";
+  $("#pvlink").href = t.dataset.url;
+  const f = $("#pvframe");
+  f.setAttribute("sandbox", SANDBOX);
+  f.src = t.dataset.url;
+  $("#preview").showModal();
+});
+$("#pvreload").addEventListener("click", () => { const f = $("#pvframe"); f.src = f.src; });
+$("#pvclose").addEventListener("click", () => $("#preview").close());
+$("#preview").addEventListener("close", () => { $("#pvframe").src = "about:blank"; });
+
+function applyPreviewToggle() {
+  document.body.classList.toggle("nopreview", !previewsOn);
+  $("#previews").checked = previewsOn;
+}
+$("#previews").addEventListener("change", (ev) => {
+  previewsOn = ev.target.checked;
+  try { localStorage.setItem("localdev.previews", previewsOn ? "1" : "0"); } catch {}
+  applyPreviewToggle();
+  refresh();
+});
+applyPreviewToggle();
 $("#logs").addEventListener("close", () => { logApp = null; });
 
 refresh();
