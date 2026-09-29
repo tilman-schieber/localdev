@@ -147,13 +147,15 @@ function appInfo(a) {
 // otherwise the 2s refresh would reload every app constantly.
 function updateThumb(row, a) {
   const t = row.querySelector(".thumb");
-  const key = !previewsOn ? "off" : a.status === "running" ? `${a.url}|${a.started_at || ""}` : a.status;
+  const key = !previewsOn ? "off" : a.no_preview ? "disabled" : a.status === "running" ? `${a.url}|${a.started_at || ""}` : a.status;
   if (t.dataset.key === key) return;
   t.dataset.key = key;
-  t.dataset.url = a.status === "running" ? a.url : "";
-  t.classList.toggle("idle", a.status !== "running");
-  t.title = a.status === "running" ? "Click to preview" : "";
+  const live = a.status === "running" && !a.no_preview;
+  t.dataset.url = live ? a.url : "";
+  t.classList.toggle("idle", !live);
+  t.title = live ? "Click to preview" : "";
   if (!previewsOn) t.innerHTML = "";
+  else if (a.no_preview) t.textContent = "preview off";
   else if (a.status === "running") t.innerHTML = `<iframe src="${esc(a.url)}" tabindex="-1" loading="lazy" sandbox="${SANDBOX}" title="${esc(a.name)} preview"></iframe>`;
   else t.textContent = a.status === "starting" ? "starting…" : "no preview";
 }

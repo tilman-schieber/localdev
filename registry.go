@@ -21,6 +21,7 @@ type AppConfig struct {
 	Cwd         string            `json:"cwd,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
 	RewriteHost bool              `json:"rewrite_host,omitempty"`
+	NoPreview   bool              `json:"no_preview,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
 }

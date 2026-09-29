@@ -72,6 +72,8 @@ localdev unregister api
 - Omit the name and localdev uses the app registered for the current directory, or else the
   directory's name.
 - `run` is idempotent. It restarts the app only when the definition (command, cwd, env) changed.
+- The dashboard shows a live preview of each running app. Pass `--no-preview` to `run` or
+  `register` to turn it off for that app. The header toggle turns all previews off in your browser.
 - A command that ignores `$PORT` still works in most cases: localdev finds the port the process
   group actually listens on and proxies there.
 - The process inherits the environment of the CLI call that started it, so PATH and version

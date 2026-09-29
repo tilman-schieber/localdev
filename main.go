@@ -67,7 +67,7 @@ Other:
 
 If [name] is omitted, the app whose directory is the current directory is used,
 else the current directory's name. Commands start the daemon on demand.
-Flags for run/register: --port N  --cwd DIR  --env K=V (repeatable)  --rewrite-host
+Flags for run/register: --port N  --cwd DIR  --env K=V (repeatable)  --rewrite-host  --no-preview
 Flags for run/start/restart: --no-wait  --timeout DURATION (default 60s)
 Exit codes: 0 ok, 1 error, 2 usage, 3 not found, 4 daemon unavailable,
             5 app failed to start, 6 timed out.
@@ -292,6 +292,7 @@ type defFlags struct {
 	cwd         *string
 	env         envFlag
 	rewriteHost *bool
+	noPreview   *bool
 }
 
 func addDefFlags(fs *flag.FlagSet) *defFlags {
@@ -300,6 +301,7 @@ func addDefFlags(fs *flag.FlagSet) *defFlags {
 	d.cwd = fs.String("cwd", "", "working directory (default: current directory)")
 	fs.Var(d.env, "env", "extra environment variable KEY=VALUE (repeatable)")
 	d.rewriteHost = fs.Bool("rewrite-host", false, "send Host: localhost:<port> upstream instead of <name>.localhost")
+	d.noPreview = fs.Bool("no-preview", false, "don't show a live preview of the app on the dashboard")
 	return d
 }
 
@@ -342,7 +344,7 @@ func cmdRun(args []string) int {
 			return fail(err)
 		}
 	} else {
-		req := putRequest{Port: *df.port, Command: cmdline, Cwd: dir, Env: df.env, RewriteHost: *df.rewriteHost}
+		req := putRequest{Port: *df.port, Command: cmdline, Cwd: dir, Env: df.env, RewriteHost: *df.rewriteHost, NoPreview: *df.noPreview}
 		if err := c.do("PUT", "/api/apps/"+name, req, nil); err != nil {
 			return fail(err)
 		}
@@ -430,7 +432,7 @@ func cmdRegister(args []string) int {
 		return fail(err)
 	}
 	var v AppView
-	req := putRequest{Port: *df.port, Command: *cmdStr, Cwd: dir, Env: df.env, RewriteHost: *df.rewriteHost}
+	req := putRequest{Port: *df.port, Command: *cmdStr, Cwd: dir, Env: df.env, RewriteHost: *df.rewriteHost, NoPreview: *df.noPreview}
 	if err := c.do("PUT", "/api/apps/"+name, req, &v); err != nil {
 		return fail(err)
 	}
@@ -554,6 +556,9 @@ func cmdInfo(args []string) int {
 	}
 	if v.ExitCode != nil {
 		row("exit code", *v.ExitCode)
+	}
+	if v.NoPreview {
+		row("preview", "off")
 	}
 	if v.Stale {
 		row("stale", "definition changed since start; restart to apply")

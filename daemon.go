@@ -66,6 +66,7 @@ type AppView struct {
 	Cwd         string            `json:"cwd,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
 	RewriteHost bool              `json:"rewrite_host"`
+	NoPreview   bool              `json:"no_preview"`
 	PID         int               `json:"pid,omitempty"`
 	ExitCode    *int              `json:"exit_code,omitempty"`
 	StartedAt   *time.Time        `json:"started_at,omitempty"`
@@ -115,6 +116,7 @@ func (d *Daemon) viewLocked(a *App) AppView {
 	v := AppView{
 		Name: c.Name, URL: d.appURL(c.Name), Managed: c.Command != "", Port: c.Port,
 		PortAuto: c.PortAuto, Command: c.Command, Cwd: c.Cwd, Env: c.Env, RewriteHost: c.RewriteHost,
+		NoPreview: c.NoPreview,
 		CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
 	}
 	if v.Managed {
@@ -319,6 +321,7 @@ type putRequest struct {
 	Cwd         string            `json:"cwd"`
 	Env         map[string]string `json:"env"`
 	RewriteHost bool              `json:"rewrite_host"`
+	NoPreview   bool              `json:"no_preview"`
 }
 
 // handlePut creates or replaces an app definition. It never starts or restarts processes;
@@ -362,7 +365,7 @@ func (d *Daemon) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 	c := a.cfg
 	wasAuto, oldPort := c.PortAuto, c.Port
-	c.Command, c.Cwd, c.Env, c.RewriteHost = req.Command, req.Cwd, req.Env, req.RewriteHost
+	c.Command, c.Cwd, c.Env, c.RewriteHost, c.NoPreview = req.Command, req.Cwd, req.Env, req.RewriteHost, req.NoPreview
 	c.PortAuto = req.Port == 0
 	c.Port = req.Port
 	if c.PortAuto && wasAuto {

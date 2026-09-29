@@ -51,7 +51,7 @@ stderr carries `{"error": "...", "code": "..."}`.
 
 | Command | Effect | stdout (human) |
 |---|---|---|
-| `run [name] [--port N] [--cwd D] [--env K=V] [--rewrite-host] [--no-wait] [--timeout 60s] -- CMD` | upsert a managed app and ensure it runs | URL |
+| `run [name] [--port N] [--cwd D] [--env K=V] [--rewrite-host] [--no-preview] [--no-wait] [--timeout 60s] -- CMD` | upsert a managed app and ensure it runs | URL |
 | `run [name]` | start an existing app (no redefinition) | URL |
 | `register [name] --port N` / `--cmd CMD` | upsert a definition, don't start | URL |
 | `unregister <name>` | stop and remove | nothing |
@@ -96,6 +96,7 @@ auto-assigned port (4100–4999) that stays stable across restarts when it's fre
   "cwd": "/home/me/src/myapp",
   "env": {"FOO": "1"},
   "rewrite_host": false,
+  "no_preview": false,
   "pid": 12345,
   "exit_code": 1,
   "started_at": "2026-01-01T12:00:00Z",
@@ -128,7 +129,7 @@ Base URL: `http://localhost[:port]`. Get the port from `localdev daemon status -
 | `GET /api/docs` | | this document (markdown) |
 | `GET /api/apps` | | `[App]` |
 | `GET /api/apps/{name}` | | `App` or 404 |
-| `PUT /api/apps/{name}` | `{port?, command?, cwd? (absolute), env?, rewrite_host?}`, at least port or command | `App`, 201 if created. Never starts or restarts anything |
+| `PUT /api/apps/{name}` | `{port?, command?, cwd? (absolute), env?, rewrite_host?, no_preview?}`, at least port or command | `App`, 201 if created. Never starts or restarts anything |
 | `DELETE /api/apps/{name}` | | `{ok, name}`, stops the process first |
 | `POST /api/apps/{name}/start` | optional `{env: ["K=V", ...]}` (the caller's environment for the process) | `App`. Idempotent; restarts only if stale |
 | `POST /api/apps/{name}/restart` | same | `App` |
@@ -149,6 +150,8 @@ is `running`, and treat `exited` or `stopped` as failure.
 - The Host header is passed through unchanged (`name.localhost`). `X-Forwarded-Host`,
   `X-Forwarded-Proto`, and `X-Forwarded-For` are set. If a dev server rejects the Host, register
   with `--rewrite-host` to send `localhost:<port>` instead.
+- The dashboard shows a live iframe preview of each running app. Register with `--no-preview` to
+  turn it off for one app, for example when it is heavy or has side effects on load.
 - An unknown app returns 404. An app that's down returns 502 (503 while starting), with an HTML
   page for browsers and a one-line text body otherwise.
 
