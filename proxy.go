@@ -51,6 +51,11 @@ func (d *Daemon) newProxy() http.Handler {
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			t := pr.In.Context().Value(targetKey{}).(proxyTarget)
 			pr.SetURL(&url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", t.port)})
+			// ReverseProxy re-encodes the query before Rewrite (always, under the
+			// urlmaxqueryparams=0 GODEBUG implied by go.mod's go version; otherwise for ";"
+			// or bad escapes). That reorders and drops flags dev servers match on, such as
+			// Vite's "?svelte&type=style&lang.css", so forward the client's query verbatim.
+			pr.Out.URL.RawQuery = pr.In.URL.RawQuery
 			pr.SetXForwarded()
 			if !t.rewriteHost {
 				pr.Out.Host = pr.In.Host
