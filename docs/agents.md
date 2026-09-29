@@ -6,7 +6,7 @@ A single daemon serves the proxy, a dashboard at `http://localhost[:port]`, and 
 The daemon is started automatically by any CLI command that needs it.
 
 Never hardcode URLs. Always get them from `localdev url` or from `run`'s output, because the
-daemon port can be 80 or a fallback (7780), and app ports can change.
+daemon port can be 80 or a fallback (7777), and app ports can change.
 
 ## Recommended workflow
 
@@ -154,7 +154,7 @@ is `running`, and treat `exited` or `stopped` as failure.
 
 ## Environment
 
-- `LOCALDEV_PORT`: daemon port for both daemon and CLI. The default is 80, falling back to 7780.
+- `LOCALDEV_PORT`: daemon port for both daemon and CLI. The default is 80, falling back to 7777.
 - `LOCALDEV_HOME`: put all state in one directory. The default is `$XDG_CONFIG_HOME/localdev` for
   `apps.json` and `$XDG_STATE_HOME/localdev` for logs and daemon state.
 - `LOCALDEV_NO_AUTOSTART=1`: fail with exit 4 instead of starting the daemon.

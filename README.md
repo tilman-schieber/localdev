@@ -23,10 +23,20 @@ Linux and macOS only. Windows isn't supported.
 `*.localhost` resolves to loopback in Chrome, Firefox, Safari, and curl, and on Linux with
 systemd-resolved, with no `/etc/hosts` edits.
 
+### Install with a coding agent
+
+Paste this into Claude Code or another coding agent:
+
+> Install localdev from https://github.com/tilman-schieber/localdev: run
+> `go install github.com/tilman-schieber/localdev@latest` (install Go if it's missing) and make sure
+> `localdev` is on my PATH. Then save the repo's `skills/localdev/SKILL.md` as
+> `~/.claude/skills/localdev/SKILL.md`. For other agents, add it to their instructions file instead.
+> Verify with `localdev version`.
+
 ### Port 80
 
 For clean URLs without a port, the daemon listens on port 80. If it isn't allowed to bind port 80,
-it falls back to **7780** and every URL carries `:7780`. The CLI always prints the correct URL.
+it falls back to **7777** and every URL carries `:7777`. The CLI always prints the correct URL.
 To allow port 80 on Linux, pick one:
 
 ```sh
@@ -38,7 +48,7 @@ sudo sysctl --system
 sudo setcap cap_net_bind_service=+ep ~/.local/bin/localdev
 ```
 
-To pin a port instead, set `LOCALDEV_PORT=7780` in your shell profile.
+To pin a port instead, set `LOCALDEV_PORT=7777` in your shell profile.
 
 ## Usage
 

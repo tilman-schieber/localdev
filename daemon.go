@@ -27,7 +27,7 @@ var dashboardHTML []byte
 
 const (
 	defaultPort  = 80
-	fallbackPort = 7780
+	fallbackPort = 7777
 )
 
 type Daemon struct {
@@ -537,7 +537,7 @@ func listenLoopback(port int) ([]net.Listener, error) {
 
 func cmdDaemonRun(args []string) int {
 	fs := flag.NewFlagSet("daemon run", flag.ContinueOnError)
-	port := fs.Int("port", envInt("LOCALDEV_PORT", 0), "port to listen on (default 80, falling back to 7780 if 80 is unavailable)")
+	port := fs.Int("port", envInt("LOCALDEV_PORT", 0), "port to listen on (default 80, falling back to 7777 if 80 is unavailable)")
 	disc := fs.Bool("discover", os.Getenv("LOCALDEV_DISCOVER") == "1", "continuously scan for unregistered localhost services")
 	interval := fs.Duration("discover-interval", 5*time.Second, "scan interval for --discover")
 	if _, _, err := parseArgs(fs, args); err != nil {

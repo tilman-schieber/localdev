@@ -43,7 +43,7 @@ func TestParseArgsInterspersed(t *testing.T) {
 }
 
 func TestHostOnly(t *testing.T) {
-	for in, want := range map[string]string{"Web.Localhost:80": "web.localhost", "[::1]:7780": "::1", "localhost.": "localhost"} {
+	for in, want := range map[string]string{"Web.Localhost:80": "web.localhost", "[::1]:7777": "::1", "localhost.": "localhost"} {
 		if got := hostOnly(in); got != want {
 			t.Errorf("hostOnly(%q) = %q, want %q", in, got, want)
 		}
