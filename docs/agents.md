@@ -61,7 +61,7 @@ stderr carries `{"error": "...", "code": "..."}`.
 | `start [name]` / `restart [name]` | ensure running / force restart, waits for readiness | URL |
 | `stop [name]` | stop the process group (SIGTERM, SIGKILL after 5s) | nothing |
 | `wait [name] [--timeout 60s]` | wait until the port accepts connections | URL |
-| `logs [name] [-n 100] [-f]` | combined stdout/stderr of the current run | log text |
+| `logs [name] [-n 100] [-f]` | combined stdout/stderr of the current run (file capped at 10 MB, older output in `<log_file>.1`) | log text |
 | `discover [--all]` | unregistered HTTP listeners on localhost (does not start the daemon) | table |
 | `daemon start\|stop\|status\|run` | manage the daemon (`run` = foreground) | |
 | `agent-help` | print this document | |
@@ -152,6 +152,9 @@ is `running`, and treat `exited` or `stopped` as failure.
   with `--rewrite-host` to send `localhost:<port>` instead.
 - The dashboard shows a live iframe preview of each running app. Register with `--no-preview` to
   turn it off for one app, for example when it is heavy or has side effects on load.
+- A managed app that hasn't run since the daemon started (after a reboot, say) is started by
+  the first request to its URL. Non-browser requests wait up to 30s for it to listen. Apps that
+  were stopped explicitly or exited stay down, so `localdev stop` is respected.
 - An unknown app returns 404. An app that's down returns 502 (503 while starting), with an HTML
   page for browsers and a one-line text body otherwise.
 

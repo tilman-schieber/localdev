@@ -560,6 +560,7 @@ func cmdDaemonRun(args []string) int {
 		return exitError
 	}
 
+	reapOrphans(p)
 	cfgs, err := loadRegistry(p)
 	if err != nil {
 		log.Print(err)
@@ -625,6 +626,7 @@ func cmdDaemonRun(args []string) int {
 	}
 	wg.Wait()
 	os.Remove(p.daemonFile())
+	os.Remove(p.procsFile())
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)

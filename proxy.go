@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -76,7 +77,19 @@ func (d *Daemon) serveProxy(w http.ResponseWriter, r *http.Request, sub string) 
 	d.mu.Lock()
 	a := d.apps[name]
 	var t proxyTarget
+	var started *Proc
 	if a != nil {
+		// Start on first visit: a managed app that hasn't run since the daemon started
+		// (e.g. after a reboot) is launched by a request. Apps that were stopped
+		// explicitly or crashed stay down.
+		if a.cfg.Command != "" && a.proc == nil {
+			if err := d.startLocked(a, nil); err != nil {
+				log.Printf("localdev: start %s on request: %v", name, err)
+			} else {
+				log.Printf("localdev: started %s on first request", name)
+				started = a.proc
+			}
+		}
 		t = proxyTarget{name: name, port: a.cfg.Port, rewriteHost: a.cfg.RewriteHost}
 	}
 	d.mu.Unlock()
@@ -85,6 +98,22 @@ func (d *Daemon) serveProxy(w http.ResponseWriter, r *http.Request, sub string) 
 			fmt.Sprintf("No app named <code>%s</code> is registered.", html.EscapeString(name)),
 			fmt.Sprintf("localdev run %s -- &lt;command&gt;\nlocaldev register %s --port &lt;port&gt;", html.EscapeString(name), html.EscapeString(name)), false)
 		return
+	}
+	if started != nil {
+		if wantsHTML(r) {
+			d.renderUnavailable(w, r, name) // "starting…" page, reloads itself
+			return
+		}
+		// API clients, curl, etc.: hold the request until the app listens.
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline) && !started.exited(); {
+			d.mu.Lock()
+			t.port = a.cfg.Port // may change if the app ignored $PORT
+			d.mu.Unlock()
+			if portOpen(t.port) {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
 	}
 	d.proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), targetKey{}, t)))
 }
@@ -118,9 +147,11 @@ func (d *Daemon) renderUnavailable(w http.ResponseWriter, r *http.Request, name 
 	}
 }
 
+func wantsHTML(r *http.Request) bool { return strings.Contains(r.Header.Get("Accept"), "text/html") }
+
 func (d *Daemon) renderPage(w http.ResponseWriter, r *http.Request, status int, title, body, hint string, reload bool) {
 	w.Header().Set("Cache-Control", "no-store")
-	if !strings.Contains(r.Header.Get("Accept"), "text/html") {
+	if !wantsHTML(r) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(status)
 		fmt.Fprintf(w, "localdev: %s\n", html.UnescapeString(title))

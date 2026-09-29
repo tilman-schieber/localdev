@@ -53,6 +53,7 @@ func (p paths) appsFile() string           { return filepath.Join(p.config, "app
 func (p paths) daemonFile() string         { return filepath.Join(p.state, "daemon.json") }
 func (p paths) lockFile() string           { return filepath.Join(p.state, "daemon.lock") }
 func (p paths) daemonLog() string          { return filepath.Join(p.state, "daemon.log") }
+func (p paths) procsFile() string          { return filepath.Join(p.state, "procs.json") }
 func (p paths) logFile(name string) string { return filepath.Join(p.state, "logs", name+".log") }
 
 func loadRegistry(p paths) (map[string]*AppConfig, error) {

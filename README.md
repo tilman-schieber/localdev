@@ -12,10 +12,18 @@ It is a single static binary with no dependencies beyond the Go standard library
 
 ## Install
 
+Prebuilt binary (Linux and macOS, x86_64 and arm64):
+
 ```sh
-go install github.com/tilman-schieber/localdev@latest   # Go 1.22+
-# or from a checkout:
-go build -o ~/.local/bin/localdev .
+mkdir -p ~/.local/bin && curl -fsSL \
+  "https://github.com/tilman-schieber/localdev/releases/latest/download/localdev_$(uname -s)_$(uname -m).tar.gz" \
+  | tar -xz -C ~/.local/bin localdev
+```
+
+Or with Go 1.22+:
+
+```sh
+go install github.com/tilman-schieber/localdev@latest
 ```
 
 Linux and macOS only. Windows isn't supported.
@@ -27,9 +35,8 @@ systemd-resolved, with no `/etc/hosts` edits.
 
 Paste this into Claude Code or another coding agent:
 
-> Install localdev from https://github.com/tilman-schieber/localdev: run
-> `go install github.com/tilman-schieber/localdev@latest` (install Go if it's missing) and make sure
-> `localdev` is on my PATH. Then save the repo's `skills/localdev/SKILL.md` as
+> Install localdev from https://github.com/tilman-schieber/localdev: put the release binary for my
+> OS and architecture on my PATH, following the README's install section. Then save the repo's `skills/localdev/SKILL.md` as
 > `~/.claude/skills/localdev/SKILL.md`. For other agents, add it to their instructions file instead.
 > Verify with `localdev version`.
 
@@ -80,7 +87,14 @@ localdev unregister api
   managers work as expected. It runs in its own process group, and stopping it signals the whole
   tree.
 - Stopping the daemon (`localdev daemon stop`) stops all managed apps. Definitions persist in
-  `~/.config/localdev/apps.json`, and processes don't restart on their own.
+  `~/.config/localdev/apps.json`.
+- Apps start on first visit. After a reboot or daemon restart, the first request to a managed
+  app's URL starts it: browsers see a "starting…" page that reloads itself, and other clients wait
+  up to 30s. Apps you stopped explicitly, and apps that crashed, stay down until started again.
+- If the daemon is killed without stopping its apps (for example with SIGKILL), the next daemon
+  stops the leftover process groups before it starts.
+- Each app's log is capped at 10 MB while it runs. Older output moves to `<name>.log.1`, which
+  also holds the previous run's output after a restart.
 
 ### Discovery (optional)
 

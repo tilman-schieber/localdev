@@ -18,7 +18,8 @@ import (
 	"time"
 )
 
-const version = "0.1.0"
+// version is overridden at release build time via -ldflags "-X main.version=...".
+var version = "0.2.0-dev"
 
 //go:embed docs/agents.md
 var agentDocs []byte

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"net"
 	"os"
@@ -138,7 +140,8 @@ func (d *Daemon) startLocked(a *App, env []string) error {
 	logPath := d.paths.logFile(cfg.Name)
 	os.MkdirAll(filepath.Dir(logPath), 0o755)
 	os.Rename(logPath, logPath+".1")
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	// O_APPEND so that truncating in capLog makes the process continue writing at offset 0.
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
@@ -176,12 +179,90 @@ func (d *Daemon) startLocked(a *App, env []string) error {
 		d.mu.Lock()
 		p.exitCode = code
 		close(p.done)
+		d.saveProcsLocked()
 		d.mu.Unlock()
 	}()
+	d.saveProcsLocked()
+	go capLog(p, f, logPath)
 	if cfg.PortAuto {
 		go d.watchForeignPort(a, p, f)
 	}
 	return nil
+}
+
+const maxLogSize = 10 << 20
+
+// capLog bounds a running process's log: once it exceeds maxLogSize, its contents
+// move to <log>.1 and the file is truncated in place (like logrotate's copytruncate).
+func capLog(p *Proc, f *os.File, path string) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-p.done:
+			return
+		case <-t.C:
+		}
+		st, err := f.Stat()
+		if err != nil || st.Size() < maxLogSize {
+			continue
+		}
+		if src, err := os.Open(path); err == nil {
+			if dst, err := os.Create(path + ".1"); err == nil {
+				io.Copy(dst, src)
+				dst.Close()
+			}
+			src.Close()
+		}
+		f.Truncate(0)
+		fmt.Fprintf(f, "[localdev] %s log exceeded %d MB; earlier output moved to %s.1\n",
+			time.Now().Format(time.RFC3339), maxLogSize>>20, filepath.Base(path))
+	}
+}
+
+// procRecord persists running process groups so a restarted daemon can clean up
+// after one that died without stopping its children (e.g. SIGKILL).
+type procRecord struct {
+	Name string `json:"name"`
+	PGID int    `json:"pgid"`
+}
+
+func (d *Daemon) saveProcsLocked() {
+	recs := []procRecord{}
+	for n, a := range d.apps {
+		if a.proc != nil && !a.proc.exited() {
+			recs = append(recs, procRecord{Name: n, PGID: a.proc.pgid})
+		}
+	}
+	data, _ := json.Marshal(recs)
+	tmp := d.paths.procsFile() + ".tmp"
+	if os.WriteFile(tmp, data, 0o644) == nil {
+		os.Rename(tmp, d.paths.procsFile())
+	}
+}
+
+// reapOrphans stops process groups left behind by a previous daemon. A group is only
+// signalled if one of its processes still carries LOCALDEV_NAME=<name>, so a recycled
+// pgid belonging to something else is never touched.
+func reapOrphans(p paths) {
+	data, err := os.ReadFile(p.procsFile())
+	if err != nil {
+		return
+	}
+	var recs []procRecord
+	json.Unmarshal(data, &recs)
+	for _, r := range recs {
+		if r.PGID <= 1 || syscall.Kill(-r.PGID, 0) != nil || !groupRunsApp(r.PGID, r.Name) {
+			continue
+		}
+		log.Printf("localdev: stopping leftover process group %d of %s from a previous daemon", r.PGID, r.Name)
+		syscall.Kill(-r.PGID, syscall.SIGTERM)
+		for i := 0; i < 30 && syscall.Kill(-r.PGID, 0) == nil; i++ {
+			time.Sleep(100 * time.Millisecond)
+		}
+		syscall.Kill(-r.PGID, syscall.SIGKILL)
+	}
+	os.Remove(p.procsFile())
 }
 
 // watchForeignPort handles commands that ignore $PORT: if the process group
