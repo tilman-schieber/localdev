@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -494,6 +495,10 @@ func cmdList(args []string) int {
 		logf("no apps registered; try: localdev run <name> -- <command>")
 		return exitOK
 	}
+	// Running (and starting) apps first, like the dashboard; the API order is alphabetical,
+	// so a stable sort keeps names alphabetical within each group.
+	up := func(a AppView) bool { return a.Status == "running" || a.Status == "starting" }
+	sort.SliceStable(apps, func(i, j int) bool { return up(apps[i]) && !up(apps[j]) })
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tSTATUS\tPORT\tURL\tCOMMAND")
 	for _, a := range apps {
