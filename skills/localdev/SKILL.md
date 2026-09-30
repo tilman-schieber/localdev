@@ -34,6 +34,10 @@ localdev run docs -- 'python3 -m http.server $PORT'
 - `run` is idempotent, so re-running it is safe: it restarts only when the command, cwd, or env
   changed.
 - If a server ignores `$PORT`, localdev usually finds the port it opened anyway.
+- **Astro:** `astro dev` detects coding agents and backgrounds itself, so the command exits at once
+  and localdev reports a failed start. Set `ASTRO_DEV_BACKGROUND=1` to keep it in the foreground:
+  `localdev run site -- 'ASTRO_DEV_BACKGROUND=1 npx astro dev --port $PORT'`. If Astro/Vite
+  rejects the `*.localhost` Host, add `--allowed-hosts <name>.localhost` or pass `--rewrite-host`.
 - Capture the URL with `URL=$(localdev run web -- '...')`, or use `--json` for the full app object.
 
 ## If you already started the server yourself

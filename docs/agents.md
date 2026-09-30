@@ -31,6 +31,10 @@ localdev stop myapp
   Arguments after `--` are joined with spaces and run by `/bin/sh -c`, as with ssh.
 - If the command ignores `$PORT` and listens elsewhere (e.g. Vite's 5173), localdev detects the
   port its process group listens on and proxies there. Passing `$PORT` explicitly is still best.
+- The command must stay in the foreground. A server that daemonizes itself exits right away and
+  `run` fails with exit 5. Astro's `astro dev` does this when it detects a coding agent; set
+  `ASTRO_DEV_BACKGROUND=1` to keep it in the foreground:
+  `localdev run site -- 'ASTRO_DEV_BACKGROUND=1 npx astro dev --port $PORT'`.
 - `run` is idempotent. If the app is already running with the same definition, nothing is restarted.
   If the command, cwd, env, or fixed port changed, it restarts. Re-running `run` is always safe.
 - If you omit the name, localdev uses the app registered for the current directory, or else
