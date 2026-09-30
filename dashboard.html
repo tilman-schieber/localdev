@@ -53,6 +53,10 @@ dialog::backdrop { background: rgb(0 0 0 / .45); }
 .dlg-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); gap: 8px; }
 #logbody { margin: 0; padding: 12px 14px; height: min(65vh, 600px); overflow: auto; white-space: pre-wrap; word-break: break-all; background: var(--bg); }
 .err { color: var(--bad); font-size: 12px; margin-left: auto; }
+.group { margin-bottom: 24px; }
+.group.hidden { display: none; }
+.group h2 { margin-top: 0; }
+.group h2 .count { font-weight: 400; letter-spacing: 0; }
 .row.app { grid-template-columns: auto minmax(0, 1fr) auto; }
 .hdr-right { display: flex; align-items: center; gap: 14px; }
 .toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--mute); cursor: pointer; user-select: none; }
@@ -82,7 +86,7 @@ body.nopreview .row.app { grid-template-columns: minmax(0, 1fr) auto; }
     </div>
   </header>
 
-  <div class="list" id="apps"><div class="empty">Loading…</div></div>
+  <div id="apps"><div class="list"><div class="empty">Loading…</div></div></div>
 
   <h2>Unregistered services <button id="scan">Scan now</button><span class="err" id="scanmsg"></span></h2>
   <div class="list" id="found"><div class="empty">Discovery is off. Press “Scan now” for a one-time scan, or start the daemon with <code>--discover</code>.</div></div>
@@ -160,35 +164,51 @@ function updateThumb(row, a) {
   else t.textContent = a.status === "starting" ? "starting…" : "no preview";
 }
 
+const isUp = (a) => a.status === "running" || a.status === "starting";
+
+function ensureGroups(el) {
+  if (el.querySelector(".group")) return;
+  rows.clear();
+  el.innerHTML = [["up", "Running"], ["down", "Not running"]].map(([k, label]) =>
+    `<section class="group" data-group="${k}"><h2>${label} <span class="count"></span></h2><div class="list"></div></section>`).join("");
+}
+
 function renderApps(apps) {
   const el = $("#apps");
   if (!apps.length) {
     rows.clear();
-    el.innerHTML = `<div class="empty">No apps registered yet. From a project directory:
+    el.innerHTML = `<div class="list"><div class="empty">No apps registered yet. From a project directory:
 <pre>localdev run myapp -- npm run dev      # managed: localdev starts it and sets $PORT
-localdev register myapp --port 3000    # proxy to a server you run yourself</pre></div>`;
+localdev register myapp --port 3000    # proxy to a server you run yourself</pre></div></div>`;
     return;
   }
-  el.querySelectorAll(":scope > .empty").forEach((n) => n.remove());
+  ensureGroups(el);
   const names = new Set(apps.map((a) => a.name));
   for (const [name, row] of rows) if (!names.has(name)) { row.remove(); rows.delete(name); }
-  apps.forEach((a, i) => {
-    let row = rows.get(a.name);
-    if (!row) {
-      row = document.createElement("div");
-      row.className = "row app";
-      row.dataset.name = a.name;
-      row.innerHTML = `<div class="thumb"></div><div class="info"></div><div class="actions"></div>`;
-      rows.set(a.name, row);
-    }
-    const { info, actions } = appInfo(a);
-    const infoEl = row.querySelector(".info"), actEl = row.querySelector(".actions");
-    if (infoEl.innerHTML !== info) infoEl.innerHTML = info;
-    if (actEl.dataset.html !== actions) { actEl.innerHTML = actions; actEl.dataset.html = actions; }
-    updateThumb(row, a);
-    // Moving an iframe in the DOM reloads it, so only insert rows that are out of place.
-    if (el.children[i] !== row) el.insertBefore(row, el.children[i] || null);
-  });
+  for (const group of el.querySelectorAll(".group")) {
+    const list = group.querySelector(".list");
+    const items = apps.filter((a) => isUp(a) === (group.dataset.group === "up"));
+    group.classList.toggle("hidden", !items.length);
+    group.querySelector(".count").textContent = items.length ? `(${items.length})` : "";
+    items.forEach((a, i) => {
+      let row = rows.get(a.name);
+      if (!row) {
+        row = document.createElement("div");
+        row.className = "row app";
+        row.dataset.name = a.name;
+        row.innerHTML = `<div class="thumb"></div><div class="info"></div><div class="actions"></div>`;
+        rows.set(a.name, row);
+      }
+      const { info, actions } = appInfo(a);
+      const infoEl = row.querySelector(".info"), actEl = row.querySelector(".actions");
+      if (infoEl.innerHTML !== info) infoEl.innerHTML = info;
+      if (actEl.dataset.html !== actions) { actEl.innerHTML = actions; actEl.dataset.html = actions; }
+      updateThumb(row, a);
+      // Moving an iframe in the DOM reloads it, so only insert rows that are out of place.
+      // Rows change groups only when their status changes, which rebuilds the thumbnail anyway.
+      if (list.children[i] !== row) list.insertBefore(row, list.children[i] || null);
+    });
+  }
 }
 
 function renderFound(list) {
@@ -218,7 +238,8 @@ async function refresh() {
     if (info.discover) renderFound(await api("GET", "/api/discover?cached=1"));
     else if (scanned) renderFound(scanned);
   } catch (e) {
-    $("#apps").innerHTML = `<div class="empty">Cannot reach the localdev daemon: ${esc(e.message)}</div>`;
+    rows.clear();
+    $("#apps").innerHTML = `<div class="list"><div class="empty">Cannot reach the localdev daemon: ${esc(e.message)}</div></div>`;
     info = null;
   }
 }
