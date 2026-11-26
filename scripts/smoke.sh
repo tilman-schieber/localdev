@@ -15,13 +15,17 @@ get() { curl -sS -H "Host: $1.localhost:$P" "http://127.0.0.1:$P$2"; }
 json() { python3 -c "import sys,json; print(json.load(sys.stdin)$1)"; }
 
 cat >"$WORK/echo.py" <<'EOF'
-import os, http.server
+import os, socketserver, http.server
+class S(http.server.HTTPServer):
+    def server_bind(self):  # skip the getfqdn lookup, which is slow on macOS
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "localhost", self.server_address[1]
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         b = self.path.encode()
         self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self, *a): pass
-http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
+S(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
 EOF
 cd "$WORK"
 
@@ -78,8 +82,9 @@ set +e
 set -e
 
 step "logs -f streams through the API"
-out=$(timeout 2 "$L" logs projweb -f -n 5 || true)
-echo "$out" | grep -q "starting" || fail "logs -f printed: $out"
+"$L" logs projweb -f -n 5 >"$WORK/follow.out" 2>&1 &  # macOS has no timeout(1)
+sleep 2; kill $! 2>/dev/null || true; wait $! 2>/dev/null || true
+grep -q "starting" "$WORK/follow.out" || fail "logs -f printed: $(cat "$WORK/follow.out")"
 
 step "logs are capped while the app runs"
 "$L" run noisy --no-wait -- "python3 -c 'import sys
