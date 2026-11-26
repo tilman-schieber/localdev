@@ -38,6 +38,10 @@ func newTestDaemon(t *testing.T) *Daemon {
 		for _, p := range ps {
 			d.stop(p)
 		}
+		// The exit goroutine still saves procs.json after p.done closes; wait for it so the
+		// temp dir can be removed.
+		d.mu.Lock()
+		d.mu.Unlock()
 	})
 	return d
 }
@@ -96,9 +100,42 @@ func needPython(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not available")
 	}
+	pyServer = pyCommand(t, "$PORT", "")
 }
 
-const pyServer = "exec python3 -m http.server --bind 127.0.0.1 $PORT"
+// pyHTTP starts a minimal HTTP server. Python's own HTTPServer.server_bind does a reverse DNS
+// lookup (socket.getfqdn) before listening, which takes many seconds on macOS CI runners.
+const pyHTTP = `import os, sys, socketserver, http.server
+class S(http.server.HTTPServer):
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "localhost", self.server_address[1]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        ok = len(sys.argv) < 3 or os.path.exists(sys.argv[2])
+        self.send_response(200 if ok else 503)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+    def log_message(self, *a): pass
+S(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+`
+
+var pyServer string // command for an app that listens on $PORT; set by needPython
+
+// pyCommand runs pyHTTP on port (a number, or "$PORT"). With readyFile, it answers 503 until
+// that file exists.
+func pyCommand(t *testing.T, port, readyFile string) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "srv.py")
+	if err := os.WriteFile(script, []byte(pyHTTP), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := "exec python3 " + script + " " + port
+	if readyFile != "" {
+		cmd += " " + readyFile
+	}
+	return cmd
+}
 
 func TestPutValidation(t *testing.T) {
 	d := newTestDaemon(t)
@@ -278,17 +315,8 @@ func TestReadyPath(t *testing.T) {
 	needPython(t)
 	dir := t.TempDir()
 	flag := filepath.Join(dir, "ready")
-	script := filepath.Join(dir, "srv.py")
-	os.WriteFile(script, []byte(`import os, http.server
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200 if os.path.exists(`+fmt.Sprintf("%q", flag)+`) else 503)
-        self.end_headers()
-    def log_message(self, *a): pass
-http.server.HTTPServer(("127.0.0.1", int(os.environ["PORT"])), H).serve_forever()
-`), 0o644)
 	d := newTestDaemon(t)
-	d.call(t, apiCall{method: "PUT", path: "/api/apps/web", body: map[string]any{"command": "exec python3 " + script, "cwd": dir, "ready_path": "/health"}})
+	d.call(t, apiCall{method: "PUT", path: "/api/apps/web", body: map[string]any{"command": pyCommand(t, "$PORT", flag), "cwd": dir, "ready_path": "/health"}})
 	d.call(t, apiCall{method: "POST", path: "/api/apps/web/start"})
 	v := d.mustView(t, "web")
 	for i := 0; i < 100 && !portOpen(v.Port); i++ {
@@ -312,7 +340,7 @@ func TestForeignPortDetected(t *testing.T) {
 	ln.Close()
 	d := newTestDaemon(t)
 	d.call(t, apiCall{method: "PUT", path: "/api/apps/web", body: map[string]any{
-		"command": fmt.Sprintf("exec python3 -m http.server --bind 127.0.0.1 %d", port), "cwd": t.TempDir()}})
+		"command": pyCommand(t, fmt.Sprint(port), ""), "cwd": t.TempDir()}})
 	d.call(t, apiCall{method: "POST", path: "/api/apps/web/start"})
 	if v := waitStatus(t, d, "web", "running"); v.Port != port {
 		t.Fatalf("proxy port %d, want detected %d", v.Port, port)
