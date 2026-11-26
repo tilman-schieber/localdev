@@ -3,7 +3,7 @@
 A small local development service registry and reverse proxy. One daemon gives each local web app
 a stable hostname and forwards requests to the app's real port:
 
-- `http://localhost`: dashboard of registered apps, with live previews, start/stop/restart, logs, and discovery
+- `http://localhost`: dashboard of registered apps, with start/stop/restart, live logs, and discovery
 - `http://myapp.localhost`: proxied to the app's port, including WebSockets/HMR and SSE/streaming
 - a CLI and a JSON API built for scripts and coding agents
 
@@ -79,8 +79,6 @@ localdev unregister api
 - Omit the name and localdev uses the app registered for the current directory, or else the
   directory's name.
 - `run` is idempotent. It restarts the app only when the definition (command, cwd, env) changed.
-- The dashboard shows a live preview of each running app. Pass `--no-preview` to `run` or
-  `register` to turn it off for that app. The header toggle turns all previews off in your browser.
 - A command that ignores `$PORT` still works in most cases: localdev finds the port the process
   group actually listens on and proxies there.
 - The process inherits the environment of the CLI call that started it, so PATH and version
@@ -90,11 +88,34 @@ localdev unregister api
   `~/.config/localdev/apps.json`.
 - Apps start on first visit. After a reboot or daemon restart, the first request to a managed
   app's URL starts it: browsers see a "starting…" page that reloads itself, and other clients wait
-  up to 30s. Apps you stopped explicitly, and apps that crashed, stay down until started again.
+  up to 30s. These apps show as `idle`. Apps you stopped explicitly, and apps that crashed, stay
+  down until started again.
+- Idle apps stop themselves if you want: `--idle-stop 2h` stops an app after two hours without
+  requests, and its next request starts it again. An open tab with a live WebSocket (HMR) counts
+  as use. Set a default for all apps with `LOCALDEV_IDLE_STOP=2h` or `daemon run --idle-stop 2h`,
+  and opt one app out with `--idle-stop off`.
+- `run` waits until the port accepts connections. Some dev servers do that before they can serve
+  a page; `--ready-path /` makes localdev wait for a real HTTP response (any status below 500).
 - If the daemon is killed without stopping its apps (for example with SIGKILL), the next daemon
   stops the leftover process groups before it starts.
 - Each app's log is capped at 10 MB while it runs. Older output moves to `<name>.log.1`, which
   also holds the previous run's output after a restart.
+
+### Project file
+
+Commit a `localdev.json` to a repo, and `localdev run` with no arguments starts its apps:
+
+```json
+{
+  "web": { "command": "npm run dev -- --port $PORT", "ready_path": "/" },
+  "api": { "command": "go run .", "cwd": "api", "env": { "DEBUG": "1" }, "idle_stop": "1h" }
+}
+```
+
+- Each key is an app name. The fields match the API: `command`, `port`, `cwd` (relative to the
+  file), `env`, `rewrite_host`, `idle_stop`, `ready_path`. Unknown fields are an error.
+- localdev looks for the file in the current directory and its parents.
+- `localdev run web` starts just that app. A command after `--` ignores the file.
 
 ### Discovery (optional)
 

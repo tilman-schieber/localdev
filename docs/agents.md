@@ -35,6 +35,7 @@ localdev stop myapp
   `run` fails with exit 5. Astro's `astro dev` does this when it detects a coding agent; set
   `ASTRO_DEV_BACKGROUND=1` to keep it in the foreground:
   `localdev run site -- 'ASTRO_DEV_BACKGROUND=1 npx astro dev --port $PORT'`.
+- If the project has a `localdev.json` (see below), `localdev run` with no arguments starts its apps.
 - `run` is idempotent. If the app is already running with the same definition, nothing is restarted.
   If the command, cwd, env, or fixed port changed, it restarts. Re-running `run` is always safe.
 - If you omit the name, localdev uses the app registered for the current directory, or else
@@ -48,6 +49,26 @@ Server you already run yourself (localdev only proxies, it does not manage the p
 localdev register myapp --port 3000   # prints the URL
 ```
 
+## Project file
+
+`localdev.json`, in the project directory or a parent, maps app names to definitions:
+
+```json
+{
+  "web": { "command": "npm run dev -- --port $PORT", "ready_path": "/" },
+  "api": { "command": "go run .", "cwd": "api", "env": { "DEBUG": "1" }, "idle_stop": "1h" }
+}
+```
+
+Fields: `command`, `port`, `cwd` (relative to the file), `env`, `rewrite_host`, `idle_stop`,
+`ready_path`; at least `command` or `port`. Unknown fields are an error.
+
+- `localdev run` (no name, no command) upserts and starts every app in the file, waits for all of
+  them, and prints one URL per line. With `--json` it prints an App object for one app, an array for several.
+- `localdev run web` uses the file's definition of `web` if it has one.
+- `run -- CMD` ignores the file. Definition flags (`--port`, `--env`, ...) together with the file
+  are a usage error (exit 2).
+
 ## Commands
 
 Add `--json` anywhere before `--` to get machine-readable stdout. On failure with `--json`,
@@ -55,8 +76,8 @@ stderr carries `{"error": "...", "code": "..."}`.
 
 | Command | Effect | stdout (human) |
 |---|---|---|
-| `run [name] [--port N] [--cwd D] [--env K=V] [--rewrite-host] [--no-preview] [--no-wait] [--timeout 60s] -- CMD` | upsert a managed app and ensure it runs | URL |
-| `run [name]` | start an existing app (no redefinition) | URL |
+| `run [name] [--port N] [--cwd D] [--env K=V] [--rewrite-host] [--idle-stop 2h\|off] [--ready-path /P] [--no-wait] [--timeout 60s] -- CMD` | upsert a managed app and ensure it runs | URL |
+| `run [name]` | start the app(s) from `localdev.json`, else an existing app (no redefinition) | URL(s) |
 | `register [name] --port N` / `--cmd CMD` | upsert a definition, don't start | URL |
 | `unregister <name>` | stop and remove | nothing |
 | `list` | all apps | table |
@@ -64,8 +85,8 @@ stderr carries `{"error": "...", "code": "..."}`.
 | `url [name]` | | URL |
 | `start [name]` / `restart [name]` | ensure running / force restart, waits for readiness | URL |
 | `stop [name]` | stop the process group (SIGTERM, SIGKILL after 5s) | nothing |
-| `wait [name] [--timeout 60s]` | wait until the port accepts connections | URL |
-| `logs [name] [-n 100] [-f]` | combined stdout/stderr of the current run (file capped at 10 MB, older output in `<log_file>.1`) | log text |
+| `wait [name] [--timeout 60s]` | wait until the app is `running` | URL |
+| `logs [name] [-n 100] [-f]` | combined stdout/stderr of the current run (file capped at 10 MB, older output in `<log_file>.1`). `-f` keeps following across restarts | log text |
 | `discover [--all]` | unregistered HTTP listeners on localhost (does not start the daemon) | table |
 | `daemon start\|stop\|status\|run` | manage the daemon (`run` = foreground) | |
 | `agent-help` | print this document | |
@@ -100,10 +121,12 @@ auto-assigned port (4100–4999) that stays stable across restarts when it's fre
   "cwd": "/home/me/src/myapp",
   "env": {"FOO": "1"},
   "rewrite_host": false,
-  "no_preview": false,
+  "idle_stop": "2h",
+  "ready_path": "/",
   "pid": 12345,
   "exit_code": 1,
   "started_at": "2026-01-01T12:00:00Z",
+  "last_request_at": "2026-01-01T12:30:00Z",
   "stale": false,
   "log_file": "/home/me/.local/state/localdev/logs/myapp.log",
   "created_at": "...", "updated_at": "..."
@@ -111,13 +134,17 @@ auto-assigned port (4100–4999) that stays stable across restarts when it's fre
 ```
 
 `status` is one of:
-- `running`: the port accepts connections.
-- `starting`: the process is alive but not listening yet.
-- `stopped`: stopped or never started.
+- `running`: the port accepts connections (and `ready_path`, if set, answered with a status below 500).
+- `starting`: the process is alive but not ready yet.
+- `idle`: not running, and the next request to its URL starts it. That is the state after a
+  daemon restart, or after `idle_stop` stopped it.
+- `stopped`: stopped explicitly; requests don't start it.
 - `exited`: the process ended on its own; see `exit_code`.
 - `down`: an unmanaged app that isn't listening.
 
 `stale: true` means the definition changed since the process started, so run `restart` to apply it.
+`idle_stop` and `ready_path` are omitted when unset; `idle_stop` is then the daemon default.
+`last_request_at` is when the proxy last served the app.
 `pid` is the process group id.
 
 ## HTTP API
@@ -129,23 +156,24 @@ Base URL: `http://localhost[:port]`. Get the port from `localdev daemon status -
 
 | Method & path | Body | Response |
 |---|---|---|
-| `GET /api/health` | | `{service:"localdev", version, pid, port, url, started_at, discover, config_file}` |
+| `GET /api/health` | | `{service:"localdev", version, pid, port, url, started_at, discover, idle_stop, config_file}` |
 | `GET /api/docs` | | this document (markdown) |
 | `GET /api/apps` | | `[App]` |
 | `GET /api/apps/{name}` | | `App` or 404 |
-| `PUT /api/apps/{name}` | `{port?, command?, cwd? (absolute), env?, rewrite_host?, no_preview?}`, at least port or command | `App`, 201 if created. Never starts or restarts anything |
+| `PUT /api/apps/{name}` | `{port?, command?, cwd? (absolute), env?, rewrite_host?, idle_stop?, ready_path?}`, at least port or command | `App`, 201 if created. Never starts or restarts anything |
 | `DELETE /api/apps/{name}` | | `{ok, name}`, stops the process first |
 | `POST /api/apps/{name}/start` | optional `{env: ["K=V", ...]}` (the caller's environment for the process) | `App`. Idempotent; restarts only if stale |
 | `POST /api/apps/{name}/restart` | same | `App` |
 | `POST /api/apps/{name}/stop` | | `App` |
 | `GET /api/apps/{name}/logs?tail=200` | | text/plain |
+| `GET /api/apps/{name}/logs?tail=200&follow=1` | | text/plain, streamed like `tail -F` until the client disconnects or the app is removed |
 | `GET /api/discover` | | `[{port, addr, pid, process, command, cwd, http, registered_as}]` (fresh scan) |
 | `GET /api/discover?cached=1` | | latest scan from continuous discovery (`daemon run --discover`) |
 | `POST /api/shutdown` | | stops all managed apps and exits |
 
 Errors: `{"error": "message", "code": "not_found|bad_request|not_managed|start_failed|forbidden|..."}`.
 `start` returns immediately. To wait for readiness, poll `GET /api/apps/{name}` until `status`
-is `running`, and treat `exited` or `stopped` as failure.
+is `running`, and treat `exited`, `stopped` or `idle` as failure.
 
 ## Proxy behavior
 
@@ -154,10 +182,8 @@ is `running`, and treat `exited` or `stopped` as failure.
 - The Host header is passed through unchanged (`name.localhost`). `X-Forwarded-Host`,
   `X-Forwarded-Proto`, and `X-Forwarded-For` are set. If a dev server rejects the Host, register
   with `--rewrite-host` to send `localhost:<port>` instead.
-- The dashboard shows a live iframe preview of each running app. Register with `--no-preview` to
-  turn it off for one app, for example when it is heavy or has side effects on load.
-- A managed app that hasn't run since the daemon started (after a reboot, say) is started by
-  the first request to its URL. Non-browser requests wait up to 30s for it to listen. Apps that
+- A managed app that is `idle` (it hasn't run since the daemon started, or `idle_stop` stopped
+  it) is started by the next request to its URL. Non-browser requests wait up to 30s for it to listen. Apps that
   were stopped explicitly or exited stay down, so `localdev stop` is respected.
 - An unknown app returns 404. An app that's down returns 502 (503 while starting), with an HTML
   page for browsers and a one-line text body otherwise.
@@ -169,3 +195,5 @@ is `running`, and treat `exited` or `stopped` as failure.
   `apps.json` and `$XDG_STATE_HOME/localdev` for logs and daemon state.
 - `LOCALDEV_NO_AUTOSTART=1`: fail with exit 4 instead of starting the daemon.
 - `LOCALDEV_DISCOVER=1`: an auto-started daemon runs continuous discovery.
+- `LOCALDEV_IDLE_STOP=2h`: an auto-started daemon stops managed apps after this long without
+  requests, unless an app sets its own `idle_stop`. Default off.

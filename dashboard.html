@@ -58,20 +58,23 @@ dialog::backdrop { background: rgb(0 0 0 / .45); }
 .group h2 { margin-top: 0; }
 .group h2 .count { font-weight: 400; letter-spacing: 0; }
 .row.app { grid-template-columns: auto minmax(0, 1fr) auto; }
-.hdr-right { display: flex; align-items: center; gap: 14px; }
-.toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--mute); cursor: pointer; user-select: none; }
-.thumb { width: 176px; height: 110px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; position: relative;
-         background: var(--bg); cursor: zoom-in; flex: none; display: grid; place-items: center; color: var(--mute); font-size: 11px; }
-.thumb iframe { position: absolute; top: 0; left: 0; width: 1280px; height: 800px; border: 0; background: #fff;
-                transform: scale(0.1375); transform-origin: 0 0; pointer-events: none; }
-.thumb.idle { cursor: default; }
-body.nopreview .thumb { display: none; }
-body.nopreview .row.app { grid-template-columns: minmax(0, 1fr) auto; }
-#preview { width: min(1280px, calc(100vw - 32px)); }
-#preview .dlg-head a { font-family: var(--mono); font-size: 12px; color: var(--accent); margin-right: auto; margin-left: 10px; }
-#preview iframe { display: block; width: 100%; height: min(78vh, 900px); border: 0; background: #fff; }
+.dot.idle { background: transparent; box-shadow: inset 0 0 0 2px var(--off); }
+.fav { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); position: relative;
+       display: grid; place-items: center; overflow: hidden; color: var(--mute); font-weight: 600; font-size: 13px; text-transform: uppercase; align-self: start; }
+.fav img { position: absolute; inset: 3px; width: calc(100% - 6px); height: calc(100% - 6px); object-fit: contain; background: var(--bg); }
+.since { color: var(--mute); font-size: 12px; }
+button.copy { padding: 0 6px; font-size: 11px; color: var(--mute); }
+button.armed { border-color: var(--bad); color: var(--bad); }
+.found-name { font: inherit; font-family: var(--mono); font-size: 12px; padding: 3px 6px; width: 150px; border-radius: 6px;
+              border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+#toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); max-width: calc(100vw - 32px); background: var(--card);
+         border: 1px solid var(--bad); color: var(--bad); padding: 8px 14px; border-radius: 8px; font-size: 13px;
+         box-shadow: 0 6px 24px rgb(0 0 0 / .18); display: none; }
+#toast.show { display: block; }
 @media (max-width: 640px) {
-  .row, .row.app, body.nopreview .row.app { grid-template-columns: 1fr; }
+  .row { grid-template-columns: 1fr; }
+  .row.app { grid-template-columns: auto minmax(0, 1fr); }
+  .row.app .actions { grid-column: 1 / -1; }
   .actions { justify-content: flex-start; }
 }
 </style>
@@ -80,10 +83,7 @@ body.nopreview .row.app { grid-template-columns: minmax(0, 1fr) auto; }
 <div class="wrap">
   <header>
     <h1>localdev <span id="ver"></span></h1>
-    <div class="hdr-right">
-      <label class="toggle"><input type="checkbox" id="previews" checked> Previews</label>
-      <div class="meta" id="daemon"></div>
-    </div>
+    <div class="meta" id="daemon"></div>
   </header>
 
   <div id="apps"><div class="list"><div class="empty">Loading…</div></div></div>
@@ -97,16 +97,12 @@ body.nopreview .row.app { grid-template-columns: minmax(0, 1fr) auto; }
   <pre id="logbody"></pre>
 </dialog>
 
-<dialog id="preview">
-  <div class="dlg-head"><strong id="pvtitle"></strong><a id="pvlink" target="_blank" rel="noopener"></a>
-    <button id="pvreload">Reload</button><button id="pvclose">Close</button></div>
-  <iframe id="pvframe" title="App preview"></iframe>
-</dialog>
+<div id="toast" role="alert"></div>
 
 <script>
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-let info = null, logApp = null, scanned = null;
+let info = null, scanned = null;
 
 async function api(method, path, body) {
   const res = await fetch(path, {
@@ -120,51 +116,75 @@ async function api(method, path, body) {
   return data;
 }
 
-const SANDBOX = "allow-scripts allow-same-origin allow-forms allow-popups allow-modals";
+let toastTimer;
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 6000);
+}
+
+function ago(iso) {
+  const s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+  return d ? `${d}d ${h % 24}h` : h ? `${h}h ${m % 60}m` : `${m}m`;
+}
+
 const rows = new Map();
-let previewsOn = true;
-try { previewsOn = localStorage.getItem("localdev.previews") !== "0"; } catch {}
+const isUp = (a) => a.status === "running" || a.status === "starting";
 
 function appInfo(a) {
   const managed = a.managed;
-  const alive = a.status === "running" || a.status === "starting";
   const sub = managed ? `$ ${a.command}` : `proxy only → port ${a.port}`;
   const btns = [];
   if (managed) {
-    if (alive) btns.push(`<button data-act="restart">Restart</button><button data-act="stop">Stop</button>`);
+    if (isUp(a)) btns.push(`<button data-act="restart">Restart</button><button data-act="stop">Stop</button>`);
     else btns.push(`<button class="primary" data-act="start">Start</button>`);
     btns.push(`<button data-act="logs">Logs</button>`);
   }
   btns.push(`<button class="danger" data-act="remove">Remove</button>`);
   const stale = a.stale ? `<span class="badge stale" title="Definition changed since start; restart to apply">stale</span>` : "";
   const exit = a.status === "exited" ? ` (code ${esc(a.exit_code)})` : "";
-  const info = `<div class="title"><span class="dot ${esc(a.status)}" title="${esc(a.status)}"></span>
+  const tip = a.status === "idle" ? "Not running; the next request to its URL starts it" : a.status;
+  const html = `<div class="title"><span class="dot ${esc(a.status)}" title="${esc(tip)}"></span>
       <a class="name" href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.name)}</a>
       <a class="url" href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.url)}</a>
-      <span class="badge">${esc(a.status)}${exit}</span><span class="badge">:${esc(a.port)}</span>${stale}</div>
+      <button class="copy" data-act="copy" data-url="${esc(a.url)}" title="Copy URL">Copy</button>
+      <span class="badge" title="${esc(tip)}">${esc(a.status)}${exit}</span><span class="badge">:${esc(a.port)}</span>${stale}
+      <span class="since"></span></div>
     <div class="sub" title="${esc(sub)}">${esc(sub)}</div>
     ${a.cwd ? `<div class="sub" title="${esc(a.cwd)}">${esc(a.cwd)}</div>` : ""}`;
-  return { info, actions: btns.join("") };
+  return { html, actions: btns.join("") };
 }
 
-// Thumbnails are live iframes; only rebuild one when the app's reachability changes,
-// otherwise the 2s refresh would reload every app constantly.
-function updateThumb(row, a) {
-  const t = row.querySelector(".thumb");
-  const key = !previewsOn ? "off" : a.no_preview ? "disabled" : a.status === "running" ? `${a.url}|${a.started_at || ""}` : a.status;
-  if (t.dataset.key === key) return;
-  t.dataset.key = key;
-  const live = a.status === "running" && !a.no_preview;
-  t.dataset.url = live ? a.url : "";
-  t.classList.toggle("idle", !live);
-  t.title = live ? "Click to preview" : "";
-  if (!previewsOn) t.innerHTML = "";
-  else if (a.no_preview) t.textContent = "preview off";
-  else if (a.status === "running") t.innerHTML = `<iframe src="${esc(a.url)}" tabindex="-1" loading="lazy" sandbox="${SANDBOX}" title="${esc(a.name)} preview"></iframe>`;
-  else t.textContent = a.status === "starting" ? "starting…" : "no preview";
+function since(a) {
+  const parts = [];
+  if (a.status === "running" && a.started_at) parts.push(`up ${ago(a.started_at)}`);
+  if (a.status === "idle") parts.push("starts on next visit");
+  if (a.last_request_at) {
+    const t = ago(a.last_request_at);
+    parts.push(`last request ${t === "just now" ? t : t + " ago"}`);
+  }
+  return parts.join(" · ");
 }
 
-const isUp = (a) => a.status === "running" || a.status === "starting";
+// The favicon is only loaded for running apps: a request to an idle app would start it.
+// It is rebuilt only when the app (re)starts, so the 2s refresh doesn't refetch it.
+function updateFav(row, a) {
+  const el = row.querySelector(".fav");
+  const key = a.status === "running" ? `${a.url}|${a.started_at || ""}` : "letter";
+  if (el.dataset.key === key) return;
+  el.dataset.key = key;
+  el.textContent = a.name[0];
+  if (a.status !== "running") return;
+  const img = new Image();
+  img.alt = "";
+  img.onerror = () => img.remove();
+  img.src = `${a.url}/favicon.ico`;
+  el.append(img);
+}
 
 function ensureGroups(el) {
   if (el.querySelector(".group")) return;
@@ -196,16 +216,15 @@ localdev register myapp --port 3000    # proxy to a server you run yourself</pre
         row = document.createElement("div");
         row.className = "row app";
         row.dataset.name = a.name;
-        row.innerHTML = `<div class="thumb"></div><div class="info"></div><div class="actions"></div>`;
+        row.innerHTML = `<span class="fav"></span><div class="info"></div><div class="actions"></div>`;
         rows.set(a.name, row);
       }
-      const { info, actions } = appInfo(a);
+      const { html, actions } = appInfo(a);
       const infoEl = row.querySelector(".info"), actEl = row.querySelector(".actions");
-      if (infoEl.innerHTML !== info) infoEl.innerHTML = info;
+      if (infoEl.dataset.html !== html) { infoEl.innerHTML = html; infoEl.dataset.html = html; }
       if (actEl.dataset.html !== actions) { actEl.innerHTML = actions; actEl.dataset.html = actions; }
-      updateThumb(row, a);
-      // Moving an iframe in the DOM reloads it, so only insert rows that are out of place.
-      // Rows change groups only when their status changes, which rebuilds the thumbnail anyway.
+      infoEl.querySelector(".since").textContent = since(a);
+      updateFav(row, a);
       if (list.children[i] !== row) list.insertBefore(row, list.children[i] || null);
     });
   }
@@ -214,12 +233,15 @@ localdev register myapp --port 3000    # proxy to a server you run yourself</pre
 function renderFound(list) {
   const el = $("#found");
   const items = list.filter((l) => l.http && !l.registered_as);
-  if (!items.length) { el.innerHTML = `<div class="empty">No unregistered HTTP services found.</div>`; return; }
-  el.innerHTML = items.map((l) => `<div class="row" data-port="${l.port}" data-suggest="${esc(suggest(l))}">
+  const html = !items.length ? `<div class="empty">No unregistered HTTP services found.</div>` :
+    items.map((l) => `<div class="row" data-port="${l.port}">
     <div><div class="title"><span class="dot running"></span><a class="name" href="http://localhost:${l.port}" target="_blank" rel="noopener">:${l.port}</a>
       <span class="badge">${esc(l.process || "unknown process")}</span>${l.pid ? `<span class="badge">pid ${l.pid}</span>` : ""}</div>
       ${l.cwd ? `<div class="sub">${esc(l.cwd)}</div>` : ""}${l.command ? `<div class="sub" title="${esc(l.command)}">${esc(l.command)}</div>` : ""}</div>
-    <div class="actions"><button class="primary" data-act="adopt">Register</button></div></div>`).join("");
+    <div class="actions"><input class="found-name" aria-label="App name" value="${esc(suggest(l))}" spellcheck="false">
+      <button class="primary" data-act="adopt">Register</button></div></div>`).join("");
+  // Re-rendering every refresh would wipe a name being typed, so only replace changed markup.
+  if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; }
 }
 
 function suggest(l) {
@@ -232,7 +254,7 @@ async function refresh() {
     if (!info) {
       info = await api("GET", "/api/health");
       $("#ver").textContent = "v" + info.version;
-      $("#daemon").textContent = `${info.url} · pid ${info.pid}`;
+      $("#daemon").textContent = `${info.url} · pid ${info.pid}` + (info.idle_stop !== "off" ? ` · idle stop ${info.idle_stop}` : "");
     }
     renderApps(await api("GET", "/api/apps"));
     if (info.discover) renderFound(await api("GET", "/api/discover?cached=1"));
@@ -244,32 +266,55 @@ async function refresh() {
   }
 }
 
+// Remove asks for a second click instead of a confirm() dialog.
+function armed(btn, label) {
+  if (btn.classList.contains("armed")) return true;
+  const orig = btn.textContent;
+  btn.classList.add("armed");
+  btn.textContent = label;
+  setTimeout(() => { btn.classList.remove("armed"); btn.textContent = orig; }, 4000);
+  return false;
+}
+
 $("#apps").addEventListener("click", async (ev) => {
   const btn = ev.target.closest("button[data-act]");
   if (!btn) return;
   const name = btn.closest(".row").dataset.name;
   const act = btn.dataset.act;
   if (act === "logs") return openLogs(name);
-  if (act === "remove" && !confirm(`Unregister ${name}?`)) return;
+  if (act === "copy") {
+    try {
+      await navigator.clipboard.writeText(btn.dataset.url);
+      btn.textContent = "Copied";
+      setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+    } catch (e) { toast(`Could not copy: ${e.message}`); }
+    return;
+  }
+  if (act === "remove" && !armed(btn, `Remove ${name}?`)) return;
   btn.disabled = true;
   try {
     if (act === "remove") await api("DELETE", `/api/apps/${name}`);
     else await api("POST", `/api/apps/${name}/${act}`);
-  } catch (e) { alert(e.message); }
+  } catch (e) { toast(`${name}: ${e.message}`); btn.disabled = false; }
   refresh();
 });
 
-$("#found").addEventListener("click", async (ev) => {
-  const btn = ev.target.closest("button[data-act=adopt]");
-  if (!btn) return;
-  const row = btn.closest(".row");
-  const name = prompt(`Name for the app on port ${row.dataset.port}:`, row.dataset.suggest);
-  if (!name) return;
+async function adopt(row) {
+  const input = row.querySelector(".found-name");
+  const name = input.value.trim();
+  if (!name) return input.focus();
   try {
     await api("PUT", `/api/apps/${encodeURIComponent(name)}`, { port: Number(row.dataset.port) });
     scanned = scanned && scanned.map((l) => l.port == row.dataset.port ? { ...l, registered_as: name } : l);
-  } catch (e) { alert(e.message); }
+  } catch (e) { toast(e.message); input.focus(); return; }
   refresh();
+}
+$("#found").addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button[data-act=adopt]");
+  if (btn) adopt(btn.closest(".row"));
+});
+$("#found").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && ev.target.matches(".found-name")) adopt(ev.target.closest(".row"));
 });
 
 $("#scan").addEventListener("click", async () => {
@@ -279,55 +324,42 @@ $("#scan").addEventListener("click", async () => {
   $("#scan").disabled = false;
 });
 
-async function loadLogs() {
-  if (!logApp) return;
+// Logs stream from the daemon (tail -F style) for as long as the dialog is open.
+let logCtl = null;
+async function openLogs(name) {
   const body = $("#logbody");
-  const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
-  try { body.textContent = await api("GET", `/api/apps/${logApp}/logs?tail=500`) || "(no output yet)"; }
-  catch (e) { body.textContent = e.message; }
-  if (atBottom) body.scrollTop = body.scrollHeight;
-}
-function openLogs(name) {
-  logApp = name;
   $("#logtitle").textContent = `${name} — output`;
-  $("#logbody").textContent = "";
+  body.textContent = "";
   $("#logs").showModal();
-  loadLogs().then(() => { $("#logbody").scrollTop = $("#logbody").scrollHeight; });
+  logCtl?.abort();
+  const ctl = logCtl = new AbortController();
+  let size = 0, first = true;
+  const append = (text) => {
+    const atBottom = first || body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    first = false;
+    body.append(text);
+    size += text.length;
+    if (size > 2e6) { body.textContent = body.textContent.slice(-1e6); size = 1e6; }
+    if (atBottom) body.scrollTop = body.scrollHeight;
+  };
+  try {
+    const res = await fetch(`/api/apps/${encodeURIComponent(name)}/logs?tail=500&follow=1`, { signal: ctl.signal });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      append(value);
+    }
+  } catch (e) {
+    if (e.name !== "AbortError") append(`\n[localdev: ${e.message}]\n`);
+  }
 }
 $("#logclose").addEventListener("click", () => $("#logs").close());
-
-$("#apps").addEventListener("click", (ev) => {
-  const t = ev.target.closest(".thumb");
-  if (!t || !t.dataset.url) return;
-  const name = t.closest(".row").dataset.name;
-  $("#pvtitle").textContent = name;
-  $("#pvlink").textContent = t.dataset.url + " ↗";
-  $("#pvlink").href = t.dataset.url;
-  const f = $("#pvframe");
-  f.setAttribute("sandbox", SANDBOX);
-  f.src = t.dataset.url;
-  $("#preview").showModal();
-});
-$("#pvreload").addEventListener("click", () => { const f = $("#pvframe"); f.src = f.src; });
-$("#pvclose").addEventListener("click", () => $("#preview").close());
-$("#preview").addEventListener("close", () => { $("#pvframe").src = "about:blank"; });
-
-function applyPreviewToggle() {
-  document.body.classList.toggle("nopreview", !previewsOn);
-  $("#previews").checked = previewsOn;
-}
-$("#previews").addEventListener("change", (ev) => {
-  previewsOn = ev.target.checked;
-  try { localStorage.setItem("localdev.previews", previewsOn ? "1" : "0"); } catch {}
-  applyPreviewToggle();
-  refresh();
-});
-applyPreviewToggle();
-$("#logs").addEventListener("close", () => { logApp = null; });
+$("#logs").addEventListener("close", () => { logCtl?.abort(); logCtl = null; });
 
 refresh();
 setInterval(refresh, 2000);
-setInterval(loadLogs, 1500);
 </script>
 </body>
 </html>

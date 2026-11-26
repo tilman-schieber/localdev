@@ -21,7 +21,8 @@ type AppConfig struct {
 	Cwd         string            `json:"cwd,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
 	RewriteHost bool              `json:"rewrite_host,omitempty"`
-	NoPreview   bool              `json:"no_preview,omitempty"`
+	IdleStop    string            `json:"idle_stop,omitempty"`  // "" = daemon default, "off", or a duration
+	ReadyPath   string            `json:"ready_path,omitempty"` // HTTP path that must answer < 500 before "running"
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
 }
@@ -120,4 +121,20 @@ func sanitizeName(s string) string {
 		out = strings.Trim(out[:63], "-")
 	}
 	return out
+}
+
+// parseIdleStop validates an idle_stop value: "" (use the daemon default), "off" or "0"
+// (never), or a positive Go duration such as "30m" or "2h".
+func parseIdleStop(s string) (d time.Duration, useDefault bool, err error) {
+	switch s {
+	case "":
+		return 0, true, nil
+	case "off", "0":
+		return 0, false, nil
+	}
+	d, err = time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0, false, fmt.Errorf("invalid idle_stop %q: use a duration like 30m or 2h, or off", s)
+	}
+	return d, false, nil
 }

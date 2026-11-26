@@ -40,6 +40,10 @@ localdev run docs -- 'python3 -m http.server $PORT'
   rejects the `*.localhost` Host, add `--allowed-hosts <name>.localhost` or pass `--rewrite-host`.
 - Capture the URL with `URL=$(localdev run web -- '...')`, or use `--json` for the full app object.
 
+- **Project file:** if the repo has a `localdev.json`, just run `localdev run` (no name, no
+  command). It starts the apps the file defines and prints their URLs.
+- If `run` returns before the server can actually serve pages, add `--ready-path /`.
+
 ## If you already started the server yourself
 
 ```sh
@@ -50,7 +54,7 @@ localdev register <name> --port 5173     # proxy only; prints the URL
 
 ```sh
 localdev url [name]            # print the URL (never hardcode it; the daemon port may not be 80)
-localdev list --json           # all apps with status: running|starting|stopped|exited|down
+localdev list --json           # all apps with status: running|starting|idle|stopped|exited|down
 localdev logs [name] -n 80     # server output (stdout+stderr of the current run)
 localdev restart [name]        # force a restart
 localdev stop [name]           # stop when you're done; the definition stays registered

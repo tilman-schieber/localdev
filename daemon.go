@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"maps"
 	"net"
@@ -31,16 +32,17 @@ const (
 )
 
 type Daemon struct {
-	mu         sync.Mutex
-	paths      paths
-	port       int
-	apps       map[string]*App
-	startedAt  time.Time
-	discoverOn bool
-	discovered []Listener
-	shutdown   chan struct{}
-	mux        *http.ServeMux
-	proxy      http.Handler
+	mu          sync.Mutex
+	paths       paths
+	port        int
+	apps        map[string]*App
+	startedAt   time.Time
+	discoverOn  bool
+	discovered  []Listener
+	idleDefault time.Duration // idle timeout for apps without their own idle_stop; 0 = never
+	shutdown    chan struct{}
+	mux         *http.ServeMux
+	proxy       http.Handler
 }
 
 type daemonInfo struct {
@@ -51,6 +53,7 @@ type daemonInfo struct {
 	URL       string    `json:"url"`
 	StartedAt time.Time `json:"started_at"`
 	Discover  bool      `json:"discover"`
+	IdleStop  string    `json:"idle_stop"`
 	Config    string    `json:"config_file"`
 }
 
@@ -66,14 +69,18 @@ type AppView struct {
 	Cwd         string            `json:"cwd,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
 	RewriteHost bool              `json:"rewrite_host"`
-	NoPreview   bool              `json:"no_preview"`
+	IdleStop    string            `json:"idle_stop,omitempty"`
+	ReadyPath   string            `json:"ready_path,omitempty"`
 	PID         int               `json:"pid,omitempty"`
 	ExitCode    *int              `json:"exit_code,omitempty"`
 	StartedAt   *time.Time        `json:"started_at,omitempty"`
+	LastRequest *time.Time        `json:"last_request_at,omitempty"`
 	Stale       bool              `json:"stale,omitempty"`
 	LogFile     string            `json:"log_file,omitempty"`
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
+
+	ready bool // process passed its readiness check (probe still requires the port)
 }
 
 func (d *Daemon) baseURL(host string) string {
@@ -89,8 +96,15 @@ func (d *Daemon) info() daemonInfo {
 	return daemonInfo{
 		Service: "localdev", Version: version, PID: os.Getpid(), Port: d.port,
 		URL: d.baseURL("localhost"), StartedAt: d.startedAt, Discover: d.discoverOn,
-		Config: d.paths.appsFile(),
+		IdleStop: idleString(d.idleDefault), Config: d.paths.appsFile(),
 	}
+}
+
+func idleString(t time.Duration) string {
+	if t <= 0 {
+		return "off"
+	}
+	return t.String()
 }
 
 func (d *Daemon) saveLocked() {
@@ -116,29 +130,43 @@ func (d *Daemon) viewLocked(a *App) AppView {
 	v := AppView{
 		Name: c.Name, URL: d.appURL(c.Name), Managed: c.Command != "", Port: c.Port,
 		PortAuto: c.PortAuto, Command: c.Command, Cwd: c.Cwd, Env: c.Env, RewriteHost: c.RewriteHost,
-		NoPreview: c.NoPreview,
+		IdleStop: c.IdleStop, ReadyPath: c.ReadyPath,
 		CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
+	}
+	if !a.lastRequest.IsZero() {
+		t := a.lastRequest
+		v.LastRequest = &t
 	}
 	if v.Managed {
 		v.LogFile = d.paths.logFile(c.Name)
 		v.Status = "stopped"
-	}
-	if p := a.proc; p != nil {
-		if p.exited() {
-			if !p.stopping {
-				v.Status = "exited"
-				code := p.exitCode
-				v.ExitCode = &code
-			}
-		} else {
-			v.Status = "starting"
-			v.PID = p.pgid
-			t := p.startedAt
-			v.StartedAt = &t
-			v.Stale = !sameRunConfig(&p.cfg, c)
+		if !a.stopped && d.startsOnRequest(a) {
+			v.Status = "idle"
 		}
 	}
+	if p := a.proc; p != nil && !p.exited() {
+		v.Status = "starting"
+		v.PID = p.pgid
+		t := p.startedAt
+		v.StartedAt = &t
+		v.Stale = !sameRunConfig(&p.cfg, c)
+		v.ready = p.ready
+	} else if p != nil && !p.stopping {
+		v.Status = "exited"
+		code := p.exitCode
+		v.ExitCode = &code
+	}
 	return v
+}
+
+// startsOnRequest reports whether a request to a managed app should start it: it hasn't run
+// since the daemon started, or it was stopped for inactivity. Explicitly stopped and crashed
+// apps stay down. Caller holds d.mu.
+func (d *Daemon) startsOnRequest(a *App) bool {
+	if a.cfg.Command == "" || a.stopped {
+		return false
+	}
+	return a.proc == nil || a.proc.exited() && a.proc.idleStop
 }
 
 func probe(v *AppView) {
@@ -148,7 +176,7 @@ func probe(v *AppView) {
 		v.Status = "running"
 	case !v.Managed:
 		v.Status = "down"
-	case v.Status == "starting" && up:
+	case v.Status == "starting" && up && v.ready:
 		v.Status = "running"
 	}
 }
@@ -321,7 +349,8 @@ type putRequest struct {
 	Cwd         string            `json:"cwd"`
 	Env         map[string]string `json:"env"`
 	RewriteHost bool              `json:"rewrite_host"`
-	NoPreview   bool              `json:"no_preview"`
+	IdleStop    string            `json:"idle_stop"`
+	ReadyPath   string            `json:"ready_path"`
 }
 
 // handlePut creates or replaces an app definition. It never starts or restarts processes;
@@ -349,6 +378,14 @@ func (d *Daemon) handlePut(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad_request", "cwd must be an absolute path")
 		return
 	}
+	if _, _, err := parseIdleStop(req.IdleStop); err != nil {
+		writeErr(w, 400, "bad_request", err.Error())
+		return
+	}
+	if req.ReadyPath != "" && !strings.HasPrefix(req.ReadyPath, "/") {
+		writeErr(w, 400, "bad_request", "ready_path must start with /")
+		return
+	}
 	d.mu.Lock()
 	if req.Port == d.port {
 		d.mu.Unlock()
@@ -365,7 +402,8 @@ func (d *Daemon) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 	c := a.cfg
 	wasAuto, oldPort := c.PortAuto, c.Port
-	c.Command, c.Cwd, c.Env, c.RewriteHost, c.NoPreview = req.Command, req.Cwd, req.Env, req.RewriteHost, req.NoPreview
+	c.Command, c.Cwd, c.Env, c.RewriteHost = req.Command, req.Cwd, req.Env, req.RewriteHost
+	c.IdleStop, c.ReadyPath = req.IdleStop, req.ReadyPath
 	c.PortAuto = req.Port == 0
 	c.Port = req.Port
 	if c.PortAuto && wasAuto {
@@ -473,6 +511,7 @@ func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "not_found", "no app named "+name)
 		return
 	}
+	a.stopped = true
 	p := a.proc
 	d.mu.Unlock()
 	if p != nil {
@@ -496,7 +535,78 @@ func (d *Daemon) handleLogs(w http.ResponseWriter, r *http.Request) {
 		n = 200
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write([]byte(tailFile(d.paths.logFile(name), n)))
+	w.Header().Set("Cache-Control", "no-store")
+	if r.URL.Query().Get("follow") == "" {
+		w.Write([]byte(tailFile(d.paths.logFile(name), n)))
+		return
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff") // browsers stream text/plain only without sniffing
+	d.followLog(r.Context(), name, n, w)
+}
+
+// followLog streams the last n lines of an app's log and then everything appended to it, like
+// tail -F: it reopens the file when a restart replaces it and rewinds when capLog truncates it.
+// It returns when the client goes away or the app is removed.
+func (d *Daemon) followLog(ctx context.Context, name string, n int, w http.ResponseWriter) {
+	rc := http.NewResponseController(w)
+	path := d.paths.logFile(name)
+	var f *os.File
+	defer func() {
+		if f != nil {
+			f.Close()
+		}
+	}()
+	open := func() {
+		if f != nil {
+			f.Close()
+		}
+		f, _ = os.Open(path)
+	}
+	open()
+	if f != nil {
+		st, _ := f.Stat()
+		io.WriteString(w, tailOpen(f, st.Size(), n))
+		f.Seek(st.Size(), io.SeekStart)
+	}
+	rc.Flush()
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		d.mu.Lock()
+		_, ok := d.apps[name]
+		d.mu.Unlock()
+		if !ok {
+			return
+		}
+		st, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		var fst os.FileInfo
+		if f != nil {
+			fst, _ = f.Stat()
+		}
+		if fst == nil || !os.SameFile(st, fst) { // a restart started a new log file
+			open()
+			if f == nil {
+				continue
+			}
+		} else if pos, _ := f.Seek(0, io.SeekCurrent); fst.Size() < pos { // truncated by capLog
+			f.Seek(0, io.SeekStart)
+		}
+		if c, err := io.Copy(w, f); err != nil {
+			return
+		} else if c > 0 {
+			if rc.Flush() != nil {
+				return
+			}
+		}
+	}
 }
 
 // tailFile returns the last n lines of a file (reading at most the final 1 MiB).
@@ -506,13 +616,21 @@ func tailFile(path string, n int) string {
 		return ""
 	}
 	defer f.Close()
-	st, _ := f.Stat()
+	st, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	return tailOpen(f, st.Size(), n)
+}
+
+// tailOpen returns the last n lines of the first size bytes of f.
+func tailOpen(f *os.File, size int64, n int) string {
 	const max = 1 << 20
 	off := int64(0)
-	if st.Size() > max {
-		off = st.Size() - max
+	if size > max {
+		off = size - max
 	}
-	buf := make([]byte, st.Size()-off)
+	buf := make([]byte, size-off)
 	n2, _ := f.ReadAt(buf, off)
 	lines := strings.SplitAfter(string(buf[:n2]), "\n")
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
@@ -543,6 +661,7 @@ func cmdDaemonRun(args []string) int {
 	port := fs.Int("port", envInt("LOCALDEV_PORT", 0), "port to listen on (default 80, falling back to 7777 if 80 is unavailable)")
 	disc := fs.Bool("discover", os.Getenv("LOCALDEV_DISCOVER") == "1", "continuously scan for unregistered localhost services")
 	interval := fs.Duration("discover-interval", 5*time.Second, "scan interval for --discover")
+	idle := fs.String("idle-stop", os.Getenv("LOCALDEV_IDLE_STOP"), "stop managed apps after this long without requests, unless they set their own idle_stop (e.g. 2h; default off)")
 	if _, _, err := parseArgs(fs, args); err != nil {
 		return fail(err)
 	}
@@ -560,13 +679,18 @@ func cmdDaemonRun(args []string) int {
 		return exitError
 	}
 
+	idleDefault, _, err := parseIdleStop(*idle)
+	if err != nil {
+		return fail(usageError{err.Error()})
+	}
+
 	reapOrphans(p)
 	cfgs, err := loadRegistry(p)
 	if err != nil {
 		log.Print(err)
 		return exitError
 	}
-	d := &Daemon{paths: p, apps: map[string]*App{}, startedAt: time.Now().UTC(), discoverOn: *disc, shutdown: make(chan struct{}, 1)}
+	d := &Daemon{paths: p, apps: map[string]*App{}, startedAt: time.Now().UTC(), discoverOn: *disc, idleDefault: idleDefault, shutdown: make(chan struct{}, 1)}
 	for n, c := range cfgs {
 		d.apps[n] = &App{cfg: c}
 	}
@@ -602,6 +726,7 @@ func cmdDaemonRun(args []string) int {
 	if d.discoverOn {
 		go d.discoverLoop(*interval)
 	}
+	go d.idleLoop()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

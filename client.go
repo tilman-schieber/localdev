@@ -75,6 +75,28 @@ func (c *client) do(method, path string, body any, out any) error {
 	return nil
 }
 
+// stream copies a GET response body to w as it arrives.
+func (c *client) stream(path string, w io.Writer) error {
+	req, err := http.NewRequest("GET", c.base+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Host = "localhost"
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errDaemonDown, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		data, _ := io.ReadAll(resp.Body)
+		var ae apiError
+		json.Unmarshal(data, &ae)
+		return &callError{Status: resp.StatusCode, Code: ae.Code, Msg: ae.Error}
+	}
+	_, err = io.Copy(w, resp.Body)
+	return err
+}
+
 func (c *client) health() (daemonInfo, bool) {
 	var info daemonInfo
 	c.http.Timeout = time.Second

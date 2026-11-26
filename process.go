@@ -8,6 +8,7 @@ import (
 	"log"
 	"maps"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,9 @@ type Proc struct {
 	done      chan struct{}
 	exitCode  int
 	stopping  bool
+	idleStop  bool     // stopped for inactivity: the next request starts it again
+	ready     bool     // ready_path answered (always true without one)
+	logw      *os.File // the run's log file, closed when the process exits
 }
 
 func (p *Proc) exited() bool {
@@ -39,9 +43,12 @@ func (p *Proc) exited() bool {
 
 // App couples a persistent definition with its (optional) running process.
 type App struct {
-	cfg     *AppConfig
-	proc    *Proc
-	lastEnv []string // caller environment from the most recent start request
+	cfg         *AppConfig
+	proc        *Proc
+	lastEnv     []string  // caller environment from the most recent start request
+	stopped     bool      // stopped explicitly; stays down until started again
+	lastRequest time.Time // end of the most recent proxied request
+	active      int       // proxied requests in flight, including open WebSockets
 }
 
 const (
@@ -136,6 +143,7 @@ func (d *Daemon) startLocked(a *App, env []string) error {
 	if env != nil {
 		a.lastEnv = env
 	}
+	a.stopped = false
 
 	logPath := d.paths.logFile(cfg.Name)
 	os.MkdirAll(filepath.Dir(logPath), 0o755)
@@ -160,7 +168,8 @@ func (d *Daemon) startLocked(a *App, env []string) error {
 	}
 	snapshot := *cfg
 	snapshot.Env = maps.Clone(cfg.Env)
-	p := &Proc{cmd: cmd, pgid: cmd.Process.Pid, cfg: snapshot, env: cmd.Env, startedAt: time.Now(), done: make(chan struct{})}
+	p := &Proc{cmd: cmd, pgid: cmd.Process.Pid, cfg: snapshot, env: cmd.Env, startedAt: time.Now(), done: make(chan struct{}),
+		ready: cfg.ReadyPath == "", logw: f}
 	a.proc = p
 
 	go func() {
@@ -187,7 +196,104 @@ func (d *Daemon) startLocked(a *App, env []string) error {
 	if cfg.PortAuto {
 		go d.watchForeignPort(a, p, f)
 	}
+	if !p.ready {
+		go d.watchReady(a, p)
+	}
 	return nil
+}
+
+// watchReady marks the process ready once its ready_path answers with a status below 500.
+// Dev servers often accept connections before they can serve (first compile), so this keeps
+// the app "starting" until a real response comes back.
+func (d *Daemon) watchReady(a *App, p *Proc) {
+	client := &http.Client{
+		Timeout:       60 * time.Second, // a first compile can take a while
+		Transport:     &http.Transport{Proxy: nil, DialContext: dialLoopback, DisableKeepAlives: true},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	for !p.exited() {
+		d.mu.Lock()
+		current, port, path, rewrite := a.proc == p, a.cfg.Port, a.cfg.ReadyPath, a.cfg.RewriteHost
+		d.mu.Unlock()
+		if !current {
+			return
+		}
+		if path == "" {
+			path = "/"
+		}
+		if portOpen(port) {
+			req, _ := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d%s", port, path), nil)
+			req.Host = strings.TrimPrefix(d.appURL(p.cfg.Name), "http://")
+			if rewrite {
+				req.Host = fmt.Sprintf("localhost:%d", port)
+			}
+			if resp, err := client.Do(req); err == nil {
+				resp.Body.Close()
+				if resp.StatusCode < 500 {
+					d.mu.Lock()
+					p.ready = true
+					d.mu.Unlock()
+					return
+				}
+			}
+		}
+		select {
+		case <-p.done:
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+}
+
+// idleTimeout is how long an app may go without requests before it is stopped; 0 means never.
+func (d *Daemon) idleTimeout(c *AppConfig) time.Duration {
+	t, useDefault, err := parseIdleStop(c.IdleStop)
+	if err != nil {
+		return 0
+	}
+	if useDefault {
+		return d.idleDefault
+	}
+	return t
+}
+
+// idleCheck stops managed apps that have had no proxied traffic for their idle timeout.
+// They show as "idle" and start again on the next request, like after a daemon restart.
+func (d *Daemon) idleCheck(now time.Time) {
+	d.mu.Lock()
+	var victims []*Proc
+	for _, a := range d.apps {
+		p := a.proc
+		if p == nil || p.exited() || a.active > 0 {
+			continue
+		}
+		timeout := d.idleTimeout(a.cfg)
+		if timeout <= 0 {
+			continue
+		}
+		last := p.startedAt
+		if a.lastRequest.After(last) {
+			last = a.lastRequest
+		}
+		if now.Sub(last) < timeout {
+			continue
+		}
+		p.idleStop = true
+		fmt.Fprintf(p.logw, "[localdev] %s no requests for %s; stopping (the next request starts it again)\n",
+			now.Format(time.RFC3339), timeout)
+		log.Printf("localdev: stopping %s after %s without requests", a.cfg.Name, timeout)
+		victims = append(victims, p)
+	}
+	d.mu.Unlock()
+	for _, p := range victims {
+		d.stop(p)
+	}
+}
+
+func (d *Daemon) idleLoop() {
+	for {
+		time.Sleep(15 * time.Second)
+		d.idleCheck(time.Now())
+	}
 }
 
 const maxLogSize = 10 << 20

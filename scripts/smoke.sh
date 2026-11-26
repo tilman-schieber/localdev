@@ -47,7 +47,7 @@ step "discover sees the registered app"
 step "start on first visit after daemon restart"
 "$L" daemon stop >/dev/null
 "$L" daemon start >/dev/null
-[ "$("$L" info web --json | json '["status"]')" = stopped ] || fail "web should be stopped"
+[ "$("$L" info web --json | json '["status"]')" = idle ] || fail "web should be idle"
 [ "$(get web /lazy)" = /lazy ] || fail "request did not start the app"
 [ "$("$L" info web --json | json '["status"]')" = running ] || fail "web should be running"
 
@@ -65,6 +65,21 @@ curl -s "http://127.0.0.1:$port/" >/dev/null || echo "(child already gone after 
 "$L" daemon start >/dev/null
 sleep 1
 if curl -s -m 2 "http://127.0.0.1:$port/" >/dev/null; then fail "orphan still listening on $port"; fi
+
+step "localdev.json: run with no arguments starts the project's apps"
+mkdir -p "$WORK/proj/sub"
+printf '{"projweb": {"command": "python3 %s/echo.py", "ready_path": "/"}}\n' "$WORK" >"$WORK/proj/localdev.json"
+url=$(cd "$WORK/proj/sub" && "$L" run 2>/dev/null)
+[ "$url" = "http://projweb.localhost:$P" ] || fail "project run printed '$url'"
+[ "$(get projweb /p)" = /p ] || fail "project app not proxied"
+[ "$("$L" info projweb --json | json '["cwd"]')" = "$WORK/proj" ] || fail "project cwd"
+set +e
+(cd "$WORK/proj" && "$L" run --port 9 >/dev/null 2>&1); [ $? = 2 ] || fail "flags with localdev.json should be a usage error"
+set -e
+
+step "logs -f streams through the API"
+out=$(timeout 2 "$L" logs projweb -f -n 5 || true)
+echo "$out" | grep -q "starting" || fail "logs -f printed: $out"
 
 step "logs are capped while the app runs"
 "$L" run noisy --no-wait -- "python3 -c 'import sys

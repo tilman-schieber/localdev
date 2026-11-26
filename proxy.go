@@ -78,21 +78,35 @@ func (d *Daemon) serveProxy(w http.ResponseWriter, r *http.Request, sub string) 
 	a := d.apps[name]
 	var t proxyTarget
 	var started *Proc
+	track := a != nil && !(r.URL.Path == "/favicon.ico" && fromDashboard(r))
 	if a != nil {
-		// Start on first visit: a managed app that hasn't run since the daemon started
-		// (e.g. after a reboot) is launched by a request. Apps that were stopped
-		// explicitly or crashed stay down.
-		if a.cfg.Command != "" && a.proc == nil {
+		// Start on request: a managed app that hasn't run since the daemon started (e.g. after
+		// a reboot) or was stopped for inactivity is launched by a request. Apps that were
+		// stopped explicitly or crashed stay down.
+		if track && d.startsOnRequest(a) { // never for the dashboard's favicon fetch
 			if err := d.startLocked(a, nil); err != nil {
 				log.Printf("localdev: start %s on request: %v", name, err)
 			} else {
-				log.Printf("localdev: started %s on first request", name)
+				log.Printf("localdev: started %s on request", name)
 				started = a.proc
 			}
 		}
 		t = proxyTarget{name: name, port: a.cfg.Port, rewriteHost: a.cfg.RewriteHost}
+		if track {
+			a.active++
+			a.lastRequest = time.Now()
+		}
 	}
 	d.mu.Unlock()
+	if track {
+		// Open WebSockets (HMR) keep this request in flight, so an open browser tab counts as use.
+		defer func() {
+			d.mu.Lock()
+			a.active--
+			a.lastRequest = time.Now()
+			d.mu.Unlock()
+		}()
+	}
 	if a == nil {
 		d.renderPage(w, r, http.StatusNotFound, "Unknown app",
 			fmt.Sprintf("No app named <code>%s</code> is registered.", html.EscapeString(name)),
@@ -145,6 +159,17 @@ func (d *Daemon) renderUnavailable(w http.ResponseWriter, r *http.Request, name 
 		}
 		d.renderPage(w, r, http.StatusBadGateway, n+" is not running", msg, hint, true)
 	}
+}
+
+// fromDashboard reports whether a page on the dashboard host made the request. The dashboard
+// loads each running app's favicon, which shouldn't count as using the app.
+func fromDashboard(r *http.Request) bool {
+	u, err := url.Parse(r.Referer())
+	if err != nil {
+		return false
+	}
+	h := hostOnly(u.Host)
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
 }
 
 func wantsHTML(r *http.Request) bool { return strings.Contains(r.Header.Get("Accept"), "text/html") }

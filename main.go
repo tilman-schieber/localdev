@@ -44,6 +44,7 @@ Usage: localdev <command> [args] [--json]
 
 Apps:
   run [name] [flags] -- <cmd...>   register (or update) a managed app and start it; prints its URL
+  run [name]                       start the apps defined in ./localdev.json (or a parent's), or one of them
   register [name] --port N         register an app you run yourself (proxy only)
   register [name] --cmd CMD        register a managed app without starting it
   unregister <name>                remove an app (stops it if managed)       alias: rm
@@ -69,7 +70,8 @@ Other:
 
 If [name] is omitted, the app whose directory is the current directory is used,
 else the current directory's name. Commands start the daemon on demand.
-Flags for run/register: --port N  --cwd DIR  --env K=V (repeatable)  --rewrite-host  --no-preview
+Flags for run/register: --port N  --cwd DIR  --env K=V (repeatable)  --rewrite-host
+                        --idle-stop 2h|off  --ready-path /PATH
 Flags for run/start/restart: --no-wait  --timeout DURATION (default 60s)
 Exit codes: 0 ok, 1 error, 2 usage, 3 not found, 4 daemon unavailable,
             5 app failed to start, 6 timed out.
@@ -294,7 +296,13 @@ type defFlags struct {
 	cwd         *string
 	env         envFlag
 	rewriteHost *bool
-	noPreview   *bool
+	idleStop    *string
+	readyPath   *string
+}
+
+func (d *defFlags) request(port int, command, cwd string) putRequest {
+	return putRequest{Port: port, Command: command, Cwd: cwd, Env: d.env, RewriteHost: *d.rewriteHost,
+		IdleStop: *d.idleStop, ReadyPath: *d.readyPath}
 }
 
 func addDefFlags(fs *flag.FlagSet) *defFlags {
@@ -303,7 +311,8 @@ func addDefFlags(fs *flag.FlagSet) *defFlags {
 	d.cwd = fs.String("cwd", "", "working directory (default: current directory)")
 	fs.Var(d.env, "env", "extra environment variable KEY=VALUE (repeatable)")
 	d.rewriteHost = fs.Bool("rewrite-host", false, "send Host: localhost:<port> upstream instead of <name>.localhost")
-	d.noPreview = fs.Bool("no-preview", false, "don't show a live preview of the app on the dashboard")
+	d.idleStop = fs.String("idle-stop", "", "stop the app after this long without requests (e.g. 2h), or off; default: the daemon's setting")
+	d.readyPath = fs.String("ready-path", "", "HTTP path that must answer (status < 500) before the app counts as running")
 	return d
 }
 
@@ -331,6 +340,15 @@ func cmdRun(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
+	if len(command) == 0 && len(pos) <= 1 {
+		proj, err := findProject(dir)
+		if err != nil {
+			return fail(err)
+		}
+		if proj != nil && (len(pos) == 0 || proj.has(pos[0])) {
+			return runProject(fs, proj, pos, wf)
+		}
+	}
 	c, name, err := connectAndResolve(pos, dir)
 	if err != nil {
 		return fail(err)
@@ -346,12 +364,79 @@ func cmdRun(args []string) int {
 			return fail(err)
 		}
 	} else {
-		req := putRequest{Port: *df.port, Command: cmdline, Cwd: dir, Env: df.env, RewriteHost: *df.rewriteHost, NoPreview: *df.noPreview}
-		if err := c.do("PUT", "/api/apps/"+name, req, nil); err != nil {
+		if err := c.do("PUT", "/api/apps/"+name, df.request(*df.port, cmdline, dir), nil); err != nil {
 			return fail(err)
 		}
 	}
 	return startAndWait(c, name, "start", wf)
+}
+
+// runProject registers and starts apps from a localdev.json: all of them, or the one named.
+func runProject(fs *flag.FlagSet, proj *project, pos []string, wf *waitFlags) int {
+	var conflict []string
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "port", "env", "rewrite-host", "idle-stop", "ready-path":
+			conflict = append(conflict, "--"+f.Name)
+		}
+	})
+	if len(conflict) > 0 {
+		return fail(usageError{fmt.Sprintf("%s can't be combined with %s; change the file, or pass a command after --",
+			strings.Join(conflict, ", "), proj.path)})
+	}
+	names := proj.names
+	if len(pos) == 1 {
+		names = pos
+	}
+	c, err := connect()
+	if err != nil {
+		return fail(err)
+	}
+	if !jsonOut {
+		logf("using %s", proj.path)
+	}
+	views := make([]AppView, len(names))
+	for i, name := range names {
+		if err := c.do("PUT", "/api/apps/"+name, proj.apps[name], nil); err != nil {
+			return fail(err)
+		}
+		if proj.apps[name].Command == "" { // proxy-only entry
+			if err := c.do("GET", "/api/apps/"+name, nil, &views[i]); err != nil {
+				return fail(err)
+			}
+			continue
+		}
+		if err := c.do("POST", "/api/apps/"+name+"/start", startRequest{Env: os.Environ()}, &views[i]); err != nil {
+			return fail(err)
+		}
+	}
+	code := exitOK
+	if !*wf.noWait {
+		for i, name := range names {
+			if !views[i].Managed {
+				continue
+			}
+			v, rc := waitReady(c, name, *wf.timeout)
+			views[i] = v
+			if rc != exitOK && code == exitOK {
+				code = rc
+			}
+		}
+	}
+	if jsonOut {
+		if len(views) == 1 {
+			printJSON(views[0])
+		} else {
+			printJSON(views)
+		}
+		return code
+	}
+	for _, v := range views {
+		if *wf.noWait || v.Status == "running" || !v.Managed {
+			fmt.Println(v.URL)
+		}
+	}
+	return code
 }
 
 func startAndWait(c *client, name, action string, wf *waitFlags) int {
@@ -382,7 +467,7 @@ func waitReady(c *client, name string, timeout time.Duration) (AppView, int) {
 		switch v.Status {
 		case "running":
 			return v, exitOK
-		case "exited", "stopped":
+		case "exited", "stopped", "idle":
 			msg := name + " is " + v.Status
 			if v.ExitCode != nil {
 				msg = fmt.Sprintf("%s exited with code %d", name, *v.ExitCode)
@@ -434,8 +519,7 @@ func cmdRegister(args []string) int {
 		return fail(err)
 	}
 	var v AppView
-	req := putRequest{Port: *df.port, Command: *cmdStr, Cwd: dir, Env: df.env, RewriteHost: *df.rewriteHost, NoPreview: *df.noPreview}
-	if err := c.do("PUT", "/api/apps/"+name, req, &v); err != nil {
+	if err := c.do("PUT", "/api/apps/"+name, df.request(*df.port, *cmdStr, dir), &v); err != nil {
 		return fail(err)
 	}
 	if jsonOut {
@@ -563,8 +647,17 @@ func cmdInfo(args []string) int {
 	if v.ExitCode != nil {
 		row("exit code", *v.ExitCode)
 	}
-	if v.NoPreview {
-		row("preview", "off")
+	if v.StartedAt != nil {
+		row("started", v.StartedAt.Local().Format(time.DateTime))
+	}
+	if v.LastRequest != nil {
+		row("last request", v.LastRequest.Local().Format(time.DateTime))
+	}
+	if v.IdleStop != "" {
+		row("idle stop", v.IdleStop)
+	}
+	if v.ReadyPath != "" {
+		row("ready path", v.ReadyPath)
 	}
 	if v.Stale {
 		row("stale", "definition changed since start; restart to apply")
@@ -689,36 +782,11 @@ func cmdLogs(args []string) int {
 		fmt.Print(s)
 		return exitOK
 	}
-	return followFile(v.LogFile, *n)
-}
-
-func followFile(path string, n int) int {
-	fmt.Print(tailFile(path, n))
-	f, _ := os.Open(path)
-	if f != nil {
-		f.Seek(0, io.SeekEnd)
+	// Streams until interrupted; survives restarts and log rotation. Ends if the app is removed.
+	if err := c.stream(fmt.Sprintf("/api/apps/%s/logs?tail=%d&follow=1", name, *n), os.Stdout); err != nil {
+		return fail(err)
 	}
-	for {
-		time.Sleep(250 * time.Millisecond)
-		st, err := os.Stat(path)
-		if err != nil {
-			continue
-		}
-		var fst os.FileInfo
-		if f != nil {
-			fst, _ = f.Stat()
-		}
-		if f == nil || fst == nil || !os.SameFile(st, fst) { // restarted: new log file
-			if f != nil {
-				f.Close()
-			}
-			if f, err = os.Open(path); err != nil {
-				f = nil
-				continue
-			}
-		}
-		io.Copy(os.Stdout, f)
-	}
+	return exitOK
 }
 
 func cmdDiscover(args []string) int {
